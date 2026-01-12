@@ -2,13 +2,20 @@
 
 This Terraform module creates a complete hub-spoke network architecture to support Azure AI Foundry deployments with managed virtual networks. This infrastructure is designed for organizations that need to establish network connectivity before deploying AI Foundry resources.
 
-## � Quick Start
+## Quick Start
 
 Get your infrastructure deployed in under 60 minutes:
 
 ### 1. Prerequisites
+
+**Required Tools:** [Detailed installation instructions](#prerequisites)
+- Terraform >= 1.0
+- Azure CLI >= 2.40
+- OpenSSL >= 3.0 (for certificate installation)
+- PowerShell 7+ (recommended)
+
 ```powershell
-# Install required tools
+# Quick install (Windows)
 winget install Hashicorp.Terraform
 winget install Microsoft.AzureCLI
 winget install FireDaemon.OpenSSL
@@ -68,69 +75,23 @@ nslookup privatelink.services.ai.azure.com 10.0.1.4
 
 ### 7. Ready!
 Your infrastructure is ready for Azure AI Foundry deployment with:
-- ✅ VPN connectivity established
-- ✅ DNS resolution configured
-- ✅ Private DNS zones linked
-- ✅ Network secured with NSGs
+- VPN connectivity established
+- DNS resolution configured
+- Private DNS zones linked
+- Network secured with NSGs
 
 ---
 
-## �📋 Table of Contents
+## Table of Contents
 
-- [Quick Start Checklist](#quick-start-checklist)
+- [Configuration Variables](#configuration-variables)
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [When to Use This Module](#when-to-use-this-module)
 - [Components](#components)
 - [Prerequisites](#prerequisites)
-- [Deployment Steps](#deployment-steps)
-- [Post-Deployment Configuration](#post-deployment-configuration)
-- [Integration with AI Foundry](#integration-with-ai-foundry)
 - [Cleanup](#cleanup)
 - [Troubleshooting](#troubleshooting)
-
-## Quick Start Checklist
-
-Follow this checklist for a successful deployment:
-
-### Before Deployment
-- [ ] **Install Required Tools** (see [Prerequisites](#required-tools-installation))
-  - [ ] Terraform >= 1.0
-  - [ ] Azure CLI >= 2.40
-  - [ ] OpenSSL (for certificate installation)
-  - [ ] PowerShell 7+ (recommended)
-- [ ] **Login to Azure**: `az login`
-- [ ] **Set Subscription**: `az account set --subscription "YOUR-ID"`
-- [ ] **Configure terraform.tfvars** with your values
-
-### Deployment (45-60 minutes)
-- [ ] **Initialize**: `terraform init`
-- [ ] **Review Plan**: `terraform plan`
-- [ ] **Deploy**: `terraform apply`
-- [ ] **Wait for VPN Gateway** (30-45 minutes)
-
-### After Deployment - VPN Setup (Follow in Order!)
-- [ ] **Step 1: Install Certificates** (see [Step 1](#step-1-install-vpn-client-certificates))
-  ```powershell
-  # Export and install certificates to CurrentUser stores
-  terraform output -raw vpn_client_certificate_pem > cert.pem
-  terraform output -raw vpn_client_private_key_pem > key.pem
-  terraform output -raw vpn_root_certificate_pem > rootca.pem
-  .\fix-vpn-certificates.ps1
-  ```
-- [ ] **Verify Certificates**: Check both client cert and root CA are in CurrentUser stores
-- [ ] **Step 2: Download VPN Client** from Azure Portal
-- [ ] **Step 3: Install VPN Client** (run installer)
-- [ ] **Step 4: Connect to VPN** (should use certificates automatically)
-- [ ] **Step 5: Install DNS Server** (see [Step 5](#step-5-install-dns-server-post-deployment))
-  ```powershell
-  .\install-dns-server.ps1
-  ```
-- [ ] **Step 6: Test DNS**: `nslookup privatelink.services.ai.azure.com 10.0.1.4`
-
-### Ready for AI Foundry
-- [ ] VPN connected and DNS resolution working
-- [ ] Proceed to deploy AI Foundry resources
 
 ## Overview
 
@@ -186,19 +147,6 @@ The hub-spoke topology provides:
         │  - AI Foundry                 │
         └───────────────────────────────┘
 ```
-
-## When to Use This Module
-
-✅ **Use this module when:**
-- You need to create network infrastructure from scratch
-- You require VPN access to Azure resources for development/testing
-- You want centralized DNS management for hybrid environments
-- You need to establish connectivity before deploying AI Foundry
-
-❌ **Skip this module if:**
-- You already have an existing VNet infrastructure
-- You're using Azure-native DNS without custom requirements
-- You don't need VPN connectivity
 
 ## Components
 
@@ -422,537 +370,94 @@ Approximate costs (East US region):
 - VNets, Peering, DNS Zones: <$10/month
 - **Total**: ~$340/month
 
-## Deployment Steps
+## Configuration Variables
 
-### Step 1: Clone and Navigate
-```bash
-cd hub-spoke-network
-```
+Customize your deployment by editing `terraform.tfvars`. Copy from the example file:
 
-### Step 2: Configure Variables
-Copy the example variables file:
-```bash
+```powershell
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edit `terraform.tfvars` with your values:
+### Required Variables
+
+| Variable | Description | Example |
+|----------|-------------|----------|
+| `subscription_id` | Your Azure Subscription ID | `00000000-0000-0000-0000-000000000000` |
+
+### Optional Variables
+
+All optional variables have sensible defaults. Customize as needed:
+
+#### Resource Naming and Location
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `resource_group_name` | `rg-aifoundry-hubspoke` | Name for the resource group |
+| `location` | `eastus` | Azure region for all resources |
+| `environment` | `lab` | Environment identifier (dev/test/prod) |
+| `tags` | See example | Resource tags for organization and billing |
+
+#### Network Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `hub_vnet_address_space` | `10.0.0.0/16` | Hub VNet CIDR block |
+| `hub_gateway_subnet_prefix` | `10.0.0.0/27` | Gateway subnet (min /27 required) |
+| `hub_dns_subnet_prefix` | `10.0.1.0/24` | DNS VM subnet |
+| `spoke_vnet_address_space` | `10.1.0.0/16` | Spoke VNet CIDR block |
+| `spoke_private_endpoints_subnet_prefix` | `10.1.0.0/24` | Private endpoints subnet |
+| `spoke_delegated_subnet_prefix` | `10.1.1.0/24` | Delegated subnet for managed services |
+
+#### VPN Gateway Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `vpn_gateway_sku` | `VpnGw2` | Gateway SKU (VpnGw1/VpnGw2/VpnGw3) |
+| `vpn_client_address_pool` | `["172.16.0.0/24"]` | Address pool for VPN clients |
+| `vpn_root_certificate_name` | `P2SRootCert` | Root certificate name |
+| `vpn_root_certificate_data` | (auto-generated) | Base64 certificate data (leave empty for auto-generation) |
+
+#### DNS VM Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `dns_vm_name` | `vm-dns` | DNS virtual machine name |
+| `dns_vm_size` | `Standard_D2s_v3` | VM SKU size |
+| `dns_vm_admin_username` | `azureuser` | Admin username |
+| `dns_vm_os_disk_size_gb` | `128` | OS disk size in GB |
+
+#### Private DNS Zones
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `create_private_dns_zones` | `true` | Create 12 AI service Private DNS zones |
+
+**Note:** DNS zones are automatically created for Azure AI services including OpenAI, Cognitive Services, Storage, Key Vault, Container Registry, and Machine Learning.
+
+### Example Configuration
+
 ```hcl
-subscription_id      = "YOUR-SUBSCRIPTION-ID"
-resource_group_name  = "rg-aifoundry-hubspoke"
-location             = "eastus"
-
-# Optional: Customize VNet address spaces
-hub_vnet_address_space                = "10.0.0.0/16"
-spoke_vnet_address_space              = "10.1.0.0/16"
-
-# Optional: Customize VPN settings
-vpn_gateway_sku         = "VpnGw2"
-vpn_client_address_pool = ["172.16.0.0/24"]
-
-# Optional: Customize DNS VM
-dns_vm_size = "Standard_D2s_v3"
-```
-
-### Step 3: Initialize Terraform
-```bash
-terraform init
-```
-
-### Step 4: Review the Plan
-```bash
-terraform plan
-```
-
-Review the resources that will be created. You should see approximately 40-50 resources.
-
-### Step 5: Deploy
-```bash
-terraform apply
-```
-
-Type `yes` when prompted. The deployment will take 45-60 minutes due to VPN Gateway creation.
-
-⚠️ **Note**: Terraform will deploy the DNS VM but will NOT install the DNS Server role. DNS installation is done via a separate post-deployment script for reliability.
-
-### Step 6: Capture Outputs
-Once deployment completes, save important outputs:
-
-```bash
-# Save all outputs
-terraform output > deployment-info.txt
-
-# Get DNS VM password (optional - only needed if you want to RDP to the VM)
-terraform output -raw dns_vm_admin_password
-
-# VPN certificates are exported automatically by the post-deployment scripts
-```
-
-## Post-Deployment Configuration
-
-⚠️ **CRITICAL**: Complete these steps IN ORDER after Terraform deployment:
-
-1. **Install VPN Certificates** (Step 1)
-2. **Download & Install VPN Client** (Step 2)  
-3. **Connect to VPN** (Step 3)
-4. **Install DNS Server** (Step 5)
-5. **Test DNS Resolution** (Step 6)
-
-⚠️ **IMPORTANT**: Follow these steps in order for successful VPN connectivity.
-
-### Step 1: Install VPN Client Certificates
-
-The VPN uses certificate-based authentication. You must install the certificates **before** downloading the VPN client.
-
-#### Prerequisites for Certificate Installation
-Ensure you have the following installed (see [Prerequisites](#required-tools-installation)):
-- ✅ PowerShell 7+
-- ✅ OpenSSL (for certificate conversion)
-
-#### Install Certificates (Windows)
-
-**Using the Certificate Fix Script (Recommended)**
-
-This script properly installs certificates to CurrentUser stores (required by Windows VPN client):
-
-```powershell
-# Navigate to the Terraform directory
-cd hub-spoke-network
-
-# Export certificates to temporary files
-terraform output -raw vpn_client_certificate_pem > cert.pem
-terraform output -raw vpn_client_private_key_pem > key.pem
-terraform output -raw vpn_root_certificate_pem > rootca.pem
-
-# Run the certificate installation script
-.\fix-vpn-certificates.ps1
-
-# The script will:
-# - Clean up old certificates from previous deployments
-# - Install Root CA to CurrentUser\Root
-# - Install Client certificate with private key to CurrentUser\My
-# - Verify installation and thumbprints
-```
-
-**Verification:**
-```powershell
-# Verify client certificate is installed (should have private key)
-Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -like "*vpn-client*"} | Select-Object Subject, Thumbprint, HasPrivateKey
-
-# Verify root CA is installed
-Get-ChildItem Cert:\CurrentUser\Root | Where-Object {$_.Subject -like "*vpn-root-ca*"} | Select-Object Subject, Thumbprint
-```
-
-You should see both certificates with the client certificate showing `HasPrivateKey : True`.
-
-**Option B: Manual Installation**
-
-If the automated script fails, you can manually install using OpenSSL:
-
-```powershell
-# Export certificates
-terraform output -raw vpn_client_certificate_pem > client.crt
-terraform output -raw vpn_client_private_key_pem > client.key
-terraform output -raw vpn_root_certificate_pem > root.crt
-
-# Convert to PFX format using OpenSSL
-openssl pkcs12 -export -out client.pfx -inkey client.key -in client.crt -password pass:
-
-# Import client certificate
-Import-PfxCertificate -FilePath client.pfx -CertStoreLocation Cert:\LocalMachine\My -Exportable
-
-# Import root CA
-Import-Certificate -FilePath root.crt -CertStoreLocation Cert:\LocalMachine\Root
-
-# Clean up
-Remove-Item client.crt, client.key, root.crt, client.pfx
-```
-
-#### Install Certificates (Mac/Linux)
-
-**macOS:**
-```bash
-# Export certificates
-terraform output -raw vpn_client_certificate_pem > client.crt
-terraform output -raw vpn_client_private_key_pem > client.key
-terraform output -raw vpn_root_certificate_pem > root.crt
-
-# Convert to P12 format
-openssl pkcs12 -export -out client.p12 -inkey client.key -in client.crt -certfile root.crt
-
-# Import to Keychain (will prompt for password)
-security import client.p12 -k ~/Library/Keychains/login.keychain
-
-# Clean up
-rm client.crt client.key root.crt client.p12
-```
-
-⚠️ **Important for Windows VPN Clients**: The VPN client requires certificates to be installed in the **CurrentUser** certificate stores, NOT LocalMachine stores. Use the `fix-vpn-certificates.ps1` script which properly installs certificates to CurrentUser\My and CurrentUser\Root stores.
-
-**Windows (Recommended):**
-```powershell
-# Export certificates from Terraform outputs
-terraform output -raw vpn_client_certificate_pem > cert.pem
-terraform output -raw vpn_client_private_key_pem > key.pem
-terraform output -raw vpn_root_certificate_pem > rootca.pem
-
-# Install certificates to CurrentUser stores (fixes Error 798)
-.\fix-vpn-certificates.ps1
-
-# Verify installation
-Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -like "*vpn-client*"}
-Get-ChildItem Cert:\CurrentUser\Root | Where-Object {$_.Subject -like "*vpn-root-ca*"}
-```
-
-**Linux:**
-```bash
-# Export certificates
-terraform output -raw vpn_client_certificate_pem > client.crt
-terraform output -raw vpn_client_private_key_pem > client.key
-terraform output -raw vpn_root_certificate_pem > root.crt
-
-# Copy to OpenVPN config directory
-sudo mkdir -p /etc/openvpn/client
-sudo cp client.crt /etc/openvpn/client/
-sudo cp client.key /etc/openvpn/client/
-sudo cp root.crt /etc/openvpn/client/
-
-# Set permissions
-sudo chmod 600 /etc/openvpn/client/*.key
-```
-
-### Step 2: Download and Install VPN Client
-
-⚠️ **Only proceed after certificates are installed successfully!**
-
-#### Get VPN Gateway Information
-```bash
-# Get VPN Gateway name
-terraform output -raw vpn_gateway_id
-
-# Get VPN Gateway public IP
-terraform output -raw vpn_gateway_public_ip
-```
-
-#### Download VPN Client Configuration
-
-**Using Azure Portal:**
-1. Navigate to **Azure Portal** → **Virtual Network Gateways**
-2. Select your VPN Gateway (name from terraform output)
-3. Go to **Point-to-site configuration**
-4. Click **Download VPN client**
-5. Extract the downloaded ZIP file
-
-**Using Azure CLI:**
-```bash
-# Get resource group and gateway name
-RG_NAME=$(terraform output -raw resource_group_name)
-GW_NAME=$(terraform output vpn_gateway_id | rev | cut -d'/' -f1 | rev)
-
-# Generate VPN client package
-az network vnet-gateway vpn-client generate \
-  --resource-group $RG_NAME \
-  --name $GW_NAME \
-  --processor-architecture Amd64
-
-# Download will provide a URL - download and extract
-```
-
-#### Install VPN Client
-
-**Windows:**
-```powershell
-# Extract the downloaded ZIP file
-# Navigate to the WindowsAmd64 or WindowsX86 folder
-# Run VpnClientSetupAmd64.exe (or VpnClientSetupX86.exe)
-.\VpnClientSetupAmd64.exe
-```
-
-**Mac:**
-- Use the **Generic** folder from the ZIP
-- Import the `.ovpn` configuration file into your OpenVPN client
-- Recommended client: [Tunnelblick](https://tunnelblick.net/)
-
-**Linux:**
-- Use the **Generic** folder from the ZIP
-- Configure with OpenVPN: `sudo openvpn --config Generic/vpnconfig.ovpn`
-
-### Step 3: Connect to VPN
-
-**Windows:**
-1. Click the **Network** icon in system tray
-2. Select **VPN** → Find your connection (usually shows gateway name)
-3. Click **Connect**
-4. Authentication will use the certificate automatically
-
-**Mac/Linux:**
-1. Open your OpenVPN client
-2. Select the imported profile
-3. Click **Connect**
-
-**Verify Connection:**
-```powershell
-# Check your VPN IP address (should be from 172.16.0.0/24 pool)
-ipconfig (Windows)
-ifconfig (Mac/Linux)
-
-# Test connectivity to DNS VM
-ping 10.0.1.4
-
-# Test DNS resolution
-nslookup google.com 10.0.1.4
-```
-
-### Step 4: Configure VNet DNS Settings
-
-Both VNets need to be configured to use the custom DNS server for proper private endpoint resolution.
-
-⚠️ **Note**: The Terraform deployment already configured the VNets with `dns_servers = ["10.0.1.4"]`. This step is included for reference and troubleshooting.
-
-#### Verify DNS Configuration
-
-**Using Azure CLI:**
-```bash
-# Get resource group and VNet names
-RG_NAME=$(terraform output -raw resource_group_name)
-HUB_VNET=$(terraform output -raw hub_vnet_name)
-SPOKE_VNET=$(terraform output -raw spoke_vnet_name)
-
-# Check Hub VNet DNS settings
-az network vnet show --resource-group $RG_NAME --name $HUB_VNET --query "dhcpOptions.dnsServers"
-
-# Check Spoke VNet DNS settings
-az network vnet show --resource-group $RG_NAME --name $SPOKE_VNET --query "dhcpOptions.dnsServers"
-
-# Should show: ["10.0.1.4"]
-```
-
-#### Update DNS Settings (if needed)
-
-**Using Azure Portal:**
-1. Navigate to **Azure Portal** → **Virtual Networks**
-2. Select **Hub VNet** → **DNS servers**
-3. Choose **Custom** and enter: `10.0.1.4`
-4. Click **Save**
-5. Repeat for **Spoke VNet**
-
-**Using Azure CLI:**
-```bash
-# Update Hub VNet DNS (if needed)
-az network vnet update \
-  --resource-group $RG_NAME \
-  --name $HUB_VNET \
-  --dns-servers 10.0.1.4
-
-# Update Spoke VNet DNS (if needed)
-az network vnet update \
-  --resource-group $RG_NAME \
-  --name $SPOKE_VNET \
-  --dns-servers 10.0.1.4
-```
-
-### Step 5: Install DNS Server (Post-Deployment)
-
-⚠️ **Important**: Due to limitations with CustomScriptExtension, the DNS Server role is NOT automatically installed during Terraform deployment. You must run the separate installation script after deployment completes.
-
-#### Why a Separate Script?
-
-The Terraform `azurerm_virtual_machine_extension` with inline PowerShell commands can fail silently when:
-- Scripts are too long or complex
-- Multiple restarts are required
-- Verbose output exceeds extension limits
-
-Using a separate script with `az vm run-command` provides:
-- ✅ Reliable execution with proper error handling
-- ✅ Real-time progress output
-- ✅ Detailed logging on the VM
-- ✅ Easy re-run capability if needed
-
-#### Install DNS Server Role
-
-```powershell
-# Run the DNS installation script
-.\install-dns-server.ps1
-```
-
-**What the script does:**
-1. Retrieves resource group and VM name from Terraform outputs
-2. Installs DNS Server role on the Windows VM
-3. Configures DNS forwarder to Azure DNS (168.63.129.16)
-4. Creates conditional forwarders for 12 Azure Private DNS zones:
-   - services.ai.azure.com
-   - api.azureml.ms
-   - notebooks.azure.net
-   - blob.core.windows.net
-   - file.core.windows.net
-   - table.core.windows.net
-   - queue.core.windows.net
-   - cognitiveservices.azure.com
-   - openai.azure.com
-   - documents.azure.com
-   - search.windows.net
-   - vaultcore.azure.net
-5. Logs all operations to C:\dns-install.log and C:\dns-config.log on the VM
-
-**Expected output:**
-```
-=== DNS Server Installation ===
-Resource Group: rg-aifoundry-hubspoke-XXXXX
-VM Name: vm-dns-XXXXX
-
-Installing DNS Server role...
-✓ DNS Server role installed successfully
-
-Configuring DNS forwarder...
-✓ DNS forwarder configured to 168.63.129.16
-
-Creating conditional forwarders...
-✓ Created conditional forwarder for services.ai.azure.com
-✓ Created conditional forwarder for api.azureml.ms
-...
-
-=== DNS Installation Complete ===
-Check logs on VM:
-- C:\dns-install.log
-- C:\dns-config.log
-```
-
-**Installation time**: 3-5 minutes
-
-#### Verify DNS Installation
-
-```powershell
-# Check if DNS commands run successfully
-az vm run-command invoke \
-  --resource-group $(terraform output -raw resource_group_name) \
-  --name $(terraform output -raw dns_vm_name) \
-  --command-id RunPowerShellScript \
-  --scripts "Get-WindowsFeature DNS" "Get-DnsServerForwarder" "Get-DnsServerZone | Where-Object {\$_.ZoneType -eq 'Forwarder'}"
-```
-
-### Step 6: Verify DNS Resolution Through VPN
-
-After connecting to VPN and installing DNS Server, test DNS resolution:
-
-```powershell
-# Test Azure DNS zones (explicitly use DNS VM)
-nslookup privatelink.cognitiveservices.azure.com 10.0.1.4
-nslookup privatelink.openai.azure.com 10.0.1.4
-nslookup privatelink.services.ai.azure.com 10.0.1.4
-nslookup privatelink.blob.core.windows.net 10.0.1.4
-
-# All should resolve through 10.0.1.4
-# Response should show: Server: vm-dns-XXXX (10.0.1.4)
-```
-
-**Expected Output:**
-```
-Server:  vm-dns-fcc7a868
-Address:  10.0.1.4
-
-Non-authoritative answer:
-Name:    privatelink.cognitiveservices.azure.com
-Address:  (Empty - no records yet, this is normal before deploying services)
-```
-
-### Step 7: Verify DNS VM Configuration (Optional)
-
-#### RDP to DNS VM
-1. **Ensure you're connected to VPN first**
-2. Open Remote Desktop Connection
-3. Connect with:
-   - **Host**: `10.0.1.4`
-   - **Username**: `azureuser` (or check: `terraform output -raw dns_vm_admin_username`)
-   - **Password**: `terraform output -raw dns_vm_admin_password`
-
-#### Verify DNS Configuration
-Once logged in to the DNS VM, run these PowerShell commands:
-
-```powershell
-# Check DNS Server role is installed
-Get-WindowsFeature DNS
-
-# Verify forwarders (should show 168.63.129.16)
-Get-DnsServerForwarder
-
-# Check all conditional forwarders (should show 12 zones)
-Get-DnsServerZone | Where-Object {$_.ZoneType -eq "Forwarder"} | Select-Object ZoneName
-
-# Expected output: All 12 private DNS zones
-# - privatelink.services.ai.azure.com
-# - privatelink.api.azureml.ms
-# - privatelink.notebooks.azure.net
-# - privatelink.blob.core.windows.net
-# - privatelink.file.core.windows.net
-# - privatelink.table.core.windows.net
-# - privatelink.queue.core.windows.net
-# - privatelink.cognitiveservices.azure.com
-# - privatelink.openai.azure.com
-# - privatelink.documents.azure.com
-# - privatelink.search.windows.net
-# - privatelink.vaultcore.azure.net
-
-# Test Azure DNS resolution
-nslookup privatelink.cognitiveservices.azure.com 168.63.129.16
-nslookup privatelink.services.ai.azure.com 168.63.129.16
-```
-
-#### Check DNS Configuration Log
-```powershell
-# View the configuration completion log
-Get-Content C:\dns-config-completed.log
-```
-
-This should show a timestamp indicating when the DNS configuration completed successfully.
-
-## Integration with AI Foundry
-
-After deploying this hub-spoke network, you can deploy AI Foundry with managed VNet using the values from this deployment.
-
-### Get Required Values
-```bash
-# Spoke VNet ID (for managed VNet configuration)
-terraform output -raw spoke_vnet_id
-
-# Spoke delegated subnet ID
-terraform output -raw spoke_delegated_subnet_id
-
-# Private DNS Zone IDs
-terraform output -json private_dns_zone_ids
-```
-
-### Deploy AI Foundry
-Navigate to the managed VNet template directory:
-
-```bash
-cd ../18-managed-virtual-network-preview
-```
-
-Update your `terraform.tfvars` with:
-```hcl
-# Enable integration with hub-spoke network
-use_existing_network = true
-existing_vnet_id     = "<spoke_vnet_id from hub-spoke output>"
-existing_subnet_id   = "<spoke_private_endpoints_subnet_id from hub-spoke output>"
-
-# Optional: Use existing Private DNS Zones
-use_existing_private_dns_zones = true
-existing_private_dns_zone_ids = {
-  cognitive           = "<id>"
-  openai              = "<id>"
-  blob_storage        = "<id>"
-  # ... copy from hub-spoke outputs
+# terraform.tfvars
+subscription_id = "your-subscription-id-here"
+
+# Customize naming and location
+resource_group_name = "rg-myproject-network"
+location            = "westus"
+environment         = "dev"
+
+# Adjust network addressing if you have conflicts
+hub_vnet_address_space  = "10.10.0.0/16"
+spoke_vnet_address_space = "10.11.0.0/16"
+
+# Use a smaller/cheaper VPN gateway for dev
+vpn_gateway_sku = "VpnGw1"
+
+# Custom tags
+tags = {
+  Project     = "My AI Project"
+  CostCenter  = "Engineering"
+  Owner       = "your.email@company.com"
 }
-
-# Enable required services
-enable_storage = true
-enable_aisearch = true
-enable_cosmos = true
-```
-
-Then deploy:
-```bash
-terraform init
-terraform apply
 ```
 
 ## Cleanup
