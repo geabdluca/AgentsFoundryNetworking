@@ -28,6 +28,17 @@ resource "azurerm_network_interface" "dns_vm" {
       purpose     = "dns-server"
     }
   )
+
+  # Ensure subnet and NSG association are complete before creating NIC
+  depends_on = [
+    azurerm_subnet_network_security_group_association.dns
+  ]
+
+  timeouts {
+    create = "10m"
+    update = "10m"
+    delete = "10m"
+  }
 }
 
 # Windows Server VM for DNS

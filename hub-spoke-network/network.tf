@@ -128,6 +128,18 @@ resource "azurerm_network_security_group" "dns" {
 resource "azurerm_subnet_network_security_group_association" "dns" {
   subnet_id                 = azurerm_subnet.dns.id
   network_security_group_id = azurerm_network_security_group.dns.id
+
+  # Ensure NSG and subnet are fully created before association
+  depends_on = [
+    azurerm_network_security_group.dns,
+    azurerm_subnet.dns
+  ]
+
+  timeouts {
+    create = "10m"
+    update = "10m"
+    delete = "10m"
+  }
 }
 
 # NSG for Private Endpoints Subnet
@@ -148,4 +160,16 @@ resource "azurerm_network_security_group" "spoke_private_endpoints" {
 resource "azurerm_subnet_network_security_group_association" "spoke_private_endpoints" {
   subnet_id                 = azurerm_subnet.spoke_private_endpoints.id
   network_security_group_id = azurerm_network_security_group.spoke_private_endpoints.id
+
+  # Ensure NSG and subnet are fully created before association
+  depends_on = [
+    azurerm_network_security_group.spoke_private_endpoints,
+    azurerm_subnet.spoke_private_endpoints
+  ]
+
+  timeouts {
+    create = "10m"
+    update = "10m"
+    delete = "10m"
+  }
 }
