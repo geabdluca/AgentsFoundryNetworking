@@ -1,0 +1,53 @@
+# ============================================
+# Required Variables
+# ============================================
+
+# Your Azure Subscription ID
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# ============================================
+# Optional Variables (with defaults shown)
+# ============================================
+
+# Resource naming and location
+resource_group_name = "rg-aifoundry-hubspoke"
+location            = "eastus"
+environment         = "lab"
+
+# Tags for all resources
+tags = {
+  Project     = "AI Foundry Hub-Spoke"
+  ManagedBy   = "Terraform"
+  CostCenter  = "Engineering"
+}
+
+# Hub VNet Configuration
+hub_vnet_address_space       = "10.0.0.0/16"
+hub_gateway_subnet_prefix    = "10.0.0.0/27"
+hub_dns_subnet_prefix        = "10.0.1.0/24"
+
+# Spoke VNet Configuration
+spoke_vnet_address_space                = "10.1.0.0/16"
+spoke_private_endpoints_subnet_prefix   = "10.1.0.0/24"
+spoke_delegated_subnet_prefix           = "10.1.1.0/24"
+
+# VPN Gateway Configuration
+vpn_gateway_sku           = "VpnGw2"
+vpn_client_address_pool   = ["172.16.0.0/24"]
+vpn_root_certificate_name = "P2SRootCert"
+
+# Leave empty to auto-generate a self-signed certificate
+# Or provide your own Base64-encoded certificate data (without BEGIN/END headers)
+# vpn_root_certificate_data = ""
+
+# DNS VM Configuration
+dns_vm_name           = "vm-dns"
+dns_vm_size           = "Standard_D2s_v3"
+dns_vm_admin_username = "azureuser"
+dns_vm_os_disk_size_gb = 128
+
+# Private DNS Zones
+create_private_dns_zones = true
+
+# You can customize which Private DNS zones to create
+# Default zones are defined in variables.tf
