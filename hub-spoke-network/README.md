@@ -497,24 +497,21 @@ If you want to keep the infrastructure but reduce costs temporarily:
 
 **Solution - Use fix-vpn-certificates.ps1**:
 
-This script properly installs certificates to the correct stores and cleans up old certificates:
+This script properly installs certificates to the correct stores:
 
 ```powershell
-# Export certificates from Terraform
+# Run the certificate installation script (handles everything automatically)
 cd hub-spoke-network
-terraform output -raw vpn_client_certificate_pem > cert.pem
-terraform output -raw vpn_client_private_key_pem > key.pem
-terraform output -raw vpn_root_certificate_pem > rootca.pem
-
-# Run the fix script (handles everything automatically)
-.\fix-vpn-certificates.ps1
+.\install-vpn-certs.ps1
 
 # The script will:
-# 1. Clean up old VPN certificates from previous deployments
-# 2. Remove old VPN client profiles
-# 3. Install Root CA to CurrentUser\Root
-# 4. Install Client cert with private key to CurrentUser\My
-# 5. Verify installation
+# 1. Export certificates from Terraform outputs
+# 2. Format PEM files correctly (required for OpenSSL)
+# 3. Create PFX file with client cert and private key
+# 4. Install Root CA to CurrentUser\Root
+# 5. Install Client cert with private key to CurrentUser\My
+# 6. Clean up temporary files
+# 7. Verify installation
 ```
 
 **Manual Verification**:
@@ -606,8 +603,8 @@ winget install FireDaemon.OpenSSL
 **Solutions**:
 1. **Verify certificates are installed** (most common issue):
    ```powershell
-   Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object {$_.Subject -like "*P2SClientCert*"}
-   Get-ChildItem -Path Cert:\LocalMachine\Root | Where-Object {$_.Subject -like "*P2SRootCert*"}
+   Get-ChildItem -Path Cert:\CurrentUser\My | Where-Object {$_.Subject -like "*vpn-client*"}
+   Get-ChildItem -Path Cert:\CurrentUser\Root | Where-Object {$_.Subject -like "*vpn-root-ca*"}
    ```
 
 2. **Check VPN Gateway status**:
@@ -737,6 +734,36 @@ nslookup services.ai.azure.com 10.0.1.4
    sudo dscacheutil -flushcache
    ```
 4. Verify Private DNS Zone links are active
+
+### VM Size Not Available in Region
+**Symptom**: Terraform deployment fails with one of these errors:
+```
+InvalidParameter: The value Standard_D2s_v3 provided for the VM size is not valid.
+The valid sizes in the current region are: Standard_D2a_v4, Standard_D4a_v4...
+```
+or
+```
+InvalidParameter: Requested operation cannot be performed because the VM size Standard_D2a_v4 
+does not support the storage account type Premium_LRS of disk 'vm-dns-osdisk'.
+```
+
+**Solution**:
+1. Edit `terraform.tfvars` and change the `dns_vm_size` variable to a compatible size
+2. **Important**: The VM size must support Premium_LRS storage (look for "s" in the name)
+3. Recommended alternatives (2 vCPU, 8GB RAM, Premium storage support):
+   ```hcl
+   dns_vm_size = "Standard_D2s_v3"   # Intel-based, Premium storage
+   # or
+   dns_vm_size = "Standard_D2as_v5"  # AMD-based, Premium storage, good price/performance
+   # or
+   dns_vm_size = "Standard_D2s_v5"   # Intel-based Gen5, Premium storage
+   ```
+4. Run `terraform apply` again
+
+**Note about VM sizes**:
+- VM sizes **with** "s" (like D2**s**_v3, D2a**s**_v5) = Support Premium storage ✅
+- VM sizes **without** "s" (like D2_v3, D2a_v4) = Standard storage only ❌
+- Check [Azure VM sizes by region](https://azure.microsoft.com/en-us/explore/global-infrastructure/products-by-region/) for availability in your region
 
 ### High Costs
 **Symptom**: Monthly bill higher than expected
