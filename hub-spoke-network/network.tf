@@ -137,7 +137,7 @@ resource "azurerm_subnet_network_security_group_association" "dns" {
 
   timeouts {
     create = "10m"
-    update = "10m"
+    read   = "5m"
     delete = "10m"
   }
 }
@@ -169,7 +169,7 @@ resource "azurerm_subnet_network_security_group_association" "spoke_private_endp
 
   timeouts {
     create = "10m"
-    update = "10m"
+    read   = "5m"
     delete = "10m"
   }
 }
