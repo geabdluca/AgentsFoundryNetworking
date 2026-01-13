@@ -1,0 +1,96 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!terraform.tfvars.example
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Ignore CLI configuration files
+.terraformrc
+terraform.rc
+
+# Local .terraform directories
+**/.terraform/*
+
+# Sensitive files
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+vpn-root-cert.pem
+vpn-root-key.pem
+deployment-info.txt
+
+# VPN client files
+VpnClient/
+VpnClient.zip
+vpn-client-cert.pem
+vpn-client-key.pem
+vpn-root-ca.pem
+vpn-client.pfx
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# Azure CLI
+.azure/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.temp/
+
+# Documentation builds
+_site/
+.sass-cache/
+.jekyll-metadata
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.bak
+*~

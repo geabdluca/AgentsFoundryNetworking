@@ -57,12 +57,15 @@ terraform apply
 ### 5. Configure VPN Access
 ```powershell
 # Run as Administrator - installs certificates to CurrentUser stores
-.\fix-vpn-certificates.ps1
+.\install-vpn-certs.ps1
 
-# Download VPN client from Azure Portal:
-# Navigate to VPN Gateway > Point-to-site configuration > Download VPN client
+# Download VPN client automatically
+$rgName = terraform output -raw resource_group_name; $vpnGwId = terraform output -raw vpn_gateway_id; $vpnGwName = $vpnGwId.Split('/')[-1]; $url = az network vnet-gateway vpn-client generate --resource-group $rgName --name $vpnGwName --processor-architecture Amd64 --output tsv; Invoke-WebRequest -Uri $url -OutFile "VpnClient.zip"; Expand-Archive -Path "VpnClient.zip" -DestinationPath "VpnClient" -Force; Write-Host "VPN client downloaded to VpnClient folder" -ForegroundColor Green
 
-# Install VPN client and connect
+# Install VPN client
+.\VpnClient\WindowsAmd64\VpnClientSetupAmd64.exe
+
+# Connect to VPN (certificates will be used automatically)
 ```
 
 ### 6. Test Connectivity
