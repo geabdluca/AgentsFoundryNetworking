@@ -129,10 +129,13 @@ resource "azurerm_subnet_network_security_group_association" "dns" {
   subnet_id                 = azurerm_subnet.dns.id
   network_security_group_id = azurerm_network_security_group.dns.id
 
-  # Ensure NSG and subnet are fully created before association
+  # Ensure NSG, subnet, and peering are fully created before association
+  # This prevents 429 throttling errors by spacing out operations
   depends_on = [
     azurerm_network_security_group.dns,
-    azurerm_subnet.dns
+    azurerm_subnet.dns,
+    azurerm_virtual_network_peering.hub_to_spoke,
+    azurerm_virtual_network_peering.spoke_to_hub
   ]
 
   timeouts {
