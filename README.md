@@ -13,7 +13,7 @@ Deploy Azure AI Foundry with full network isolation using a hub-spoke network to
 
 ## Quick Start
 
-### Step 1: Deploy Hub-Spoke Network (~45-60 min)
+### Step 1: Deploy Hub-Spoke Network (~30-60 min)
 
 ```powershell
 cd hub-spoke-network/code
@@ -50,7 +50,7 @@ Expand-Archive -Path "../VpnClient.zip" -DestinationPath "../VpnClient" -Force
 ..\VpnClient\WindowsAmd64\VpnClientSetupAmd64.exe
 ```
 
-### Step 3: Deploy AI Foundry (~20 min)
+### Step 3: Deploy AI Foundry (~20-30 min)
 
 ```powershell
 cd ../byo-vnet/code
@@ -70,7 +70,7 @@ terraform apply
 1. Connect to VPN
 2. Test DNS resolution:
    ```powershell
-   nslookup aifoundry5366.cognitiveservices.azure.com 10.0.1.4
+   nslookup <ai foundry name>.services.ai.azure.com
    ```
 
 ---
