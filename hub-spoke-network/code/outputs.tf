@@ -200,10 +200,17 @@ output "next_steps" {
     ${var.vpn_auth_type == "Certificate" ? "4" : "3"}. Configure VNet DNS:
        - Update Hub and Spoke VNets to use DNS: ${azurerm_windows_virtual_machine.dns.private_ip_address}
     
-    ${var.vpn_auth_type == "Certificate" ? "5" : "4"}. Deploy AI Foundry:
-       - Use ../18-managed-virtual-network-preview/ template
-       - existing_vnet_id = "${azurerm_virtual_network.spoke.id}"
-       - existing_subnet_id = "${azurerm_subnet.spoke_delegated.id}"
+    ${var.vpn_auth_type == "Certificate" ? "5" : "4"}. Deploy AI Foundry (BYO VNet):
+       cd ../byo-vnet/code
+       # Edit terraform.tfvars with your settings
+       terraform init
+       terraform apply
+       
+       The byo-vnet deployment will automatically use:
+       - Spoke VNet ID: ${azurerm_virtual_network.spoke.id}
+       - Agents Subnet: ${azurerm_subnet.spoke_delegated.id}
+       - Private Endpoints Subnet: ${azurerm_subnet.spoke_private_endpoints.id}
+       - Private DNS Zones from this deployment
     
     For detailed instructions, see README.md
   EOT

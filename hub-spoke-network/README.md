@@ -27,8 +27,8 @@ az account set --subscription "YOUR-SUBSCRIPTION-ID"
 
 ### 2. Configure
 ```powershell
-# Clone or navigate to the hub-spoke-network directory
-cd hub-spoke-network
+# Clone or navigate to the hub-spoke-network/code directory
+cd hub-spoke-network/code
 
 # Create terraform.tfvars
 cp terraform.tfvars.example terraform.tfvars
@@ -37,7 +37,7 @@ cp terraform.tfvars.example terraform.tfvars
 
 ### 3. Deploy (45-60 minutes)
 ```powershell
-# Initialize and deploy
+# Initialize and deploy (from hub-spoke-network/code directory)
 terraform init
 terraform plan
 terraform apply
@@ -45,6 +45,9 @@ terraform apply
 
 ### 4. Configure DNS
 ```powershell
+# Navigate to hub-spoke-network folder (parent of code)
+cd ..
+
 # Install DNS Server on the DNS VM
 .\install-dns-server.ps1
 
@@ -56,11 +59,14 @@ terraform apply
 
 ### 5. Configure VPN Access
 ```powershell
-# Run as Administrator - installs certificates to CurrentUser stores
-.\install-vpn-certs.ps1
+# Open elevated PowerShell and run certificate installation
+# Run this from the hub-spoke-network directory (scripts are in parent folder)
+Start-Process powershell -Verb RunAs -ArgumentList "-NoExit", "-Command", "cd '$PWD'; .\install-vpn-certs.ps1"
 
-# Download VPN client automatically
-$rgName = terraform output -raw resource_group_name; $vpnGwId = terraform output -raw vpn_gateway_id; $vpnGwName = $vpnGwId.Split('/')[-1]; $url = az network vnet-gateway vpn-client generate --resource-group $rgName --name $vpnGwName --processor-architecture Amd64 --output tsv; Invoke-WebRequest -Uri $url -OutFile "VpnClient.zip"; Expand-Archive -Path "VpnClient.zip" -DestinationPath "VpnClient" -Force; Write-Host "VPN client downloaded to VpnClient folder" -ForegroundColor Green
+# Download VPN client automatically (run in regular PowerShell from code/ folder)
+cd code
+$rgName = terraform output -raw resource_group_name; $vpnGwId = terraform output -raw vpn_gateway_id; $vpnGwName = $vpnGwId.Split('/')[-1]; $url = az network vnet-gateway vpn-client generate --resource-group $rgName --name $vpnGwName --processor-architecture Amd64 --output tsv; Invoke-WebRequest -Uri $url -OutFile "../VpnClient.zip"; Expand-Archive -Path "../VpnClient.zip" -DestinationPath "../VpnClient" -Force; Write-Host "VPN client downloaded to VpnClient folder" -ForegroundColor Green
+cd ..
 
 # Install VPN client
 .\VpnClient\WindowsAmd64\VpnClientSetupAmd64.exe

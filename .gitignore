@@ -6,6 +6,7 @@
 .terraform.lock.hcl
 *.tfvars
 !terraform.tfvars.example
+!example.tfvars
 *.auto.tfvars
 override.tf
 override.tf.json
@@ -41,6 +42,16 @@ vpn-client-cert.pem
 vpn-client-key.pem
 vpn-root-ca.pem
 vpn-client.pfx
+**/VpnClient/
+**/VpnClient.zip
+**/code/*.pem
+**/code/*.pfx
+**/code/*.cer
+**/code/key.pem
+
+# Terraform plan files
+tfplan
+*.tfplan
 
 # OS files
 .DS_Store

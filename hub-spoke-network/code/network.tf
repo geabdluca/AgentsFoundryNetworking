@@ -62,17 +62,17 @@ resource "azurerm_subnet" "spoke_private_endpoints" {
   address_prefixes     = [var.spoke_private_endpoints_subnet_prefix]
 }
 
-# Delegated Subnet for AI Foundry Managed VNet (if needed)
+# Delegated Subnet for AI Foundry Agents (Microsoft.App/environments)
 resource "azurerm_subnet" "spoke_delegated" {
-  name                 = "snet-delegated"
+  name                 = "snet-agents"
   resource_group_name  = azurerm_resource_group.main.name
   virtual_network_name = azurerm_virtual_network.spoke.name
   address_prefixes     = [var.spoke_delegated_subnet_prefix]
 
   delegation {
-    name = "aifoundry-delegation"
+    name = "agents-delegation"
     service_delegation {
-      name    = "Microsoft.MachineLearningServices/workspaces"
+      name    = "Microsoft.App/environments"
       actions = [
         "Microsoft.Network/virtualNetworks/subnets/join/action"
       ]

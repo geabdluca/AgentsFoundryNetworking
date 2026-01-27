@@ -17,10 +17,17 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Get values from Terraform if not provided
+# Determine if we're in the code folder or parent folder
+$codeFolder = if (Test-Path ".\code\terraform.tfstate") { ".\code" } elseif (Test-Path ".\terraform.tfstate") { "." } else { ".\code" }
+Write-Host "Using terraform folder: $codeFolder" -ForegroundColor Gray
+
 if (-not $ResourceGroupName) {
     Write-Host "[1/4] Getting resource group name from Terraform..." -ForegroundColor Yellow
+    Push-Location $codeFolder
     $ResourceGroupName = terraform output -raw resource_group_name
-    if ($LASTEXITCODE -ne 0) {
+    $exitCode = $LASTEXITCODE
+    Pop-Location
+    if ($exitCode -ne 0) {
         Write-Host "ERROR: Failed to get resource group name from Terraform" -ForegroundColor Red
         exit 1
     }
@@ -29,8 +36,11 @@ if (-not $ResourceGroupName) {
 
 if (-not $VMName) {
     Write-Host "[2/4] Getting VM name from Terraform..." -ForegroundColor Yellow
+    Push-Location $codeFolder
     $VMName = terraform output -raw dns_vm_name
-    if ($LASTEXITCODE -ne 0) {
+    $exitCode = $LASTEXITCODE
+    Pop-Location
+    if ($exitCode -ne 0) {
         Write-Host "ERROR: Failed to get VM name from Terraform" -ForegroundColor Red
         exit 1
     }

@@ -14,7 +14,12 @@
 
 $ErrorActionPreference = "Stop"
 
+# Get the script's directory (handles running as admin which changes cwd to system32)
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+Set-Location $ScriptDir
+
 Write-Host "`n=== VPN Certificate Installation ===" -ForegroundColor Cyan
+Write-Host "Script directory: $ScriptDir" -ForegroundColor Gray
 Write-Host ""
 
 # Find OpenSSL
@@ -47,11 +52,18 @@ Write-Host "[OK] OpenSSL: $opensslPath" -ForegroundColor Green
 
 # Step 1: Export certificates
 Write-Host "`nStep 1: Exporting certificates from Terraform..." -ForegroundColor Yellow
+
+# Determine if we're in the code folder or parent folder (use absolute paths)
+$codeFolder = if (Test-Path "$ScriptDir\code\terraform.tfstate") { "$ScriptDir\code" } elseif (Test-Path "$ScriptDir\terraform.tfstate") { $ScriptDir } else { "$ScriptDir\code" }
+Write-Host "Using terraform folder: $codeFolder" -ForegroundColor Gray
+
 try {
+    Push-Location $codeFolder
     # Get the raw output from Terraform
     $clientCertContent = terraform output -raw vpn_client_certificate_pem
     $clientKeyContent = terraform output -raw vpn_client_private_key_pem
     $rootCaContent = terraform output -raw vpn_root_certificate_pem
+    Pop-Location
     
     # Verify we got the private key
     if (-not ($clientKeyContent -match "BEGIN.*PRIVATE KEY")) {
@@ -85,14 +97,17 @@ try {
     $clientKeyContent = Fix-PemFormat $clientKeyContent
     $rootCaContent = Fix-PemFormat $rootCaContent
     
+    # Determine cert output folder (code folder) - use absolute paths
+    $certFolder = if (Test-Path "$ScriptDir\code") { "$ScriptDir\code" } else { $ScriptDir }
+    
     # Write with UTF8 encoding, no BOM, Unix line endings
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText("$PWD\vpn-client-cert.pem", $clientCertContent, $utf8NoBom)
-    [System.IO.File]::WriteAllText("$PWD\vpn-client-key.pem", $clientKeyContent, $utf8NoBom)
-    [System.IO.File]::WriteAllText("$PWD\vpn-root-ca.pem", $rootCaContent, $utf8NoBom)
+    [System.IO.File]::WriteAllText("$certFolder\vpn-client-cert.pem", $clientCertContent, $utf8NoBom)
+    [System.IO.File]::WriteAllText("$certFolder\vpn-client-key.pem", $clientKeyContent, $utf8NoBom)
+    [System.IO.File]::WriteAllText("$certFolder\vpn-root-ca.pem", $rootCaContent, $utf8NoBom)
     
     # Debug: Show first few lines of key file
-    $firstLines = (Get-Content "vpn-client-key.pem" -TotalCount 3)
+    $firstLines = (Get-Content "$certFolder\vpn-client-key.pem" -TotalCount 3)
     Write-Host "[OK] Certificates exported and formatted" -ForegroundColor Green
     Write-Host "     Key file first 3 lines:" -ForegroundColor Gray
     $firstLines | ForEach-Object { Write-Host "       $_" -ForegroundColor Gray }
@@ -101,13 +116,16 @@ try {
     exit 1
 }
 
+# Determine cert folder for PFX operations (use absolute paths)
+$certFolder = if (Test-Path "$ScriptDir\code") { "$ScriptDir\code" } else { $ScriptDir }
+
 # Step 2: Create PFX
 Write-Host "`nStep 2: Creating PFX with certificate chain..." -ForegroundColor Yellow
 $pfxPassword = ""
-$output = & $opensslPath pkcs12 -export -out vpn-client.pfx `
-    -inkey vpn-client-key.pem `
-    -in vpn-client-cert.pem `
-    -certfile vpn-root-ca.pem `
+$output = & $opensslPath pkcs12 -export -out "$certFolder\vpn-client.pfx" `
+    -inkey "$certFolder\vpn-client-key.pem" `
+    -in "$certFolder\vpn-client-cert.pem" `
+    -certfile "$certFolder\vpn-root-ca.pem" `
     -password pass:$pfxPassword 2>&1
 
 if ($LASTEXITCODE -ne 0) {
@@ -125,7 +143,7 @@ Write-Host "[OK] Old certificates removed" -ForegroundColor Green
 # Step 4: Install Root CA
 Write-Host "`nStep 4: Installing Root CA..." -ForegroundColor Yellow
 try {
-    $rootCert = Import-Certificate -FilePath "vpn-root-ca.pem" -CertStoreLocation Cert:\CurrentUser\Root
+    $rootCert = Import-Certificate -FilePath "$certFolder\vpn-root-ca.pem" -CertStoreLocation Cert:\CurrentUser\Root
     Write-Host "[OK] Root CA installed" -ForegroundColor Green
     Write-Host "     $($rootCert.Subject)" -ForegroundColor Gray
 } catch {
@@ -138,7 +156,7 @@ Write-Host "`nStep 5: Installing Client certificate..." -ForegroundColor Yellow
 try {
     # Use a secure string with empty password
     $securePassword = New-Object System.Security.SecureString
-    $clientCert = Import-PfxCertificate -FilePath "vpn-client.pfx" `
+    $clientCert = Import-PfxCertificate -FilePath "$certFolder\vpn-client.pfx" `
         -CertStoreLocation Cert:\CurrentUser\My `
         -Password $securePassword `
         -Exportable
