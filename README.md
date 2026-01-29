@@ -135,6 +135,7 @@ AgentsFoundryNetworking/
 | DNS VM | Private DNS resolution |
 | Private DNS Zones | 12 zones for Azure services |
 | VNet Peering | Hub-spoke connectivity |
+| Azure Firewall | *(Optional)* Route agent traffic for inspection |
 
 ### AI Foundry (BYO VNet)
 | Resource | Purpose |
@@ -157,7 +158,8 @@ AgentsFoundryNetworking/
 | AI Search (Standard) | ~$250 |
 | Cosmos DB | ~$25 |
 | Storage Account | ~$5 |
-| **Total** | **~$610/month** |
+| Azure Firewall *(optional)* | ~$900 |
+| **Total** | **~$610/month** (or ~$1,510 with firewall) |
 
 ## Troubleshooting
 

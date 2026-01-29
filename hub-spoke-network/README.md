@@ -435,6 +435,21 @@ All optional variables have sensible defaults. Customize as needed:
 | `dns_vm_admin_username` | `azureuser` | Admin username |
 | `dns_vm_os_disk_size_gb` | `128` | OS disk size in GB |
 
+#### Azure Firewall (Optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `deploy_firewall` | `false` | Deploy Azure Firewall with route table for agents subnet |
+| `hub_firewall_subnet_prefix` | `10.0.2.0/26` | Firewall subnet CIDR (min /26 required) |
+
+Enable firewall to route agent traffic through Azure Firewall for inspection/logging:
+
+```hcl
+deploy_firewall = true
+```
+
+> ⚠️ **Cost**: Azure Firewall adds ~$900/month. Default rules allow all traffic - customize `firewall.tf` for production.
+
 #### Private DNS Zones
 
 | Variable | Default | Description |

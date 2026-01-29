@@ -69,6 +69,19 @@ variable "hub_dns_subnet_prefix" {
   default     = "10.0.1.0/24"
 }
 
+variable "hub_firewall_subnet_prefix" {
+  description = "Address prefix for the Azure Firewall subnet in Hub VNet (must be at least /26)"
+  type        = string
+  default     = "10.0.2.0/26"
+}
+
+# Azure Firewall Configuration
+variable "deploy_firewall" {
+  description = "Deploy Azure Firewall in the Hub VNet with route table for agents subnet"
+  type        = bool
+  default     = false
+}
+
 # Spoke VNet Configuration
 variable "spoke_vnet_address_space" {
   description = "Address space for the Foundry Spoke VNet"
