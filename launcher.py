@@ -22,7 +22,7 @@ LOG_DIR = SCRIPT_DIR / "logs"
 HUB_SPOKE_PATH = SCRIPT_DIR / "hub-spoke-network" / "code"
 BYO_VNET_PATH = SCRIPT_DIR / "byo-vnet" / "code"
 VPN_CLIENT_PATH = SCRIPT_DIR / "VpnClient"
-TOTAL_STEPS = 7
+TOTAL_STEPS = 5
 
 
 class Colors:
@@ -741,7 +741,7 @@ def show_main_menu():
     
     if has_deployment:
         completed = count_completed(state)
-        print(f"\n  {Colors.GRAY}Previous deployment: {completed} steps completed{Colors.RESET}")
+        print(f"\n  {Colors.GRAY}Previous deployment: {completed}/{TOTAL_STEPS} steps completed{Colors.RESET}")
     
     print(f"\n  {Colors.YELLOW}Options:{Colors.RESET}")
     print(f"    [1] Deploy - Start or resume deployment")
@@ -1081,8 +1081,8 @@ def run_deploy():
     log_file = logger.initialize()
     logger.log(f"Script started from: {SCRIPT_DIR}")
     
-    # Step 1: Prerequisites
-    print_step(1, "Prerequisites Check")
+    # Prerequisites (not a numbered step)
+    print(f"\n{Colors.CYAN}=== Prerequisites Check ==={Colors.RESET}")
     prereq_results = check_prerequisites()
     if not show_prerequisites(prereq_results):
         print(f"\n{Colors.RED}Please install missing prerequisites and run again.{Colors.RESET}")
@@ -1106,9 +1106,9 @@ def run_deploy():
             print(f"\n{Colors.YELLOW}Exiting. No changes made.{Colors.RESET}")
             return 0
     
-    # Step 2: Configuration
+    # Configuration (not a numbered step)
     if state is None:
-        print_step(2, "Configuration")
+        print(f"\n{Colors.CYAN}=== Configuration ==={Colors.RESET}")
         
         # Get subscription ID
         subscription_id = prompt_input("Enter Azure Subscription ID", example="00000000-0000-0000-0000-000000000000")
@@ -1140,9 +1140,9 @@ def run_deploy():
         
         print_result(True, "Configuration saved")
     
-    # Step 3: Deploy Hub-Spoke Network
+    # Step 1: Deploy Hub-Spoke Network
     if state["steps"]["hub_spoke"]["status"] != "completed":
-        print_step(3, "Deploy Hub-Spoke Network (45-60 min)")
+        print_step(1, "Deploy Hub-Spoke Network (45-60 min)")
         print(f"  {Colors.GRAY}This step takes 45-60 minutes due to VPN Gateway provisioning.{Colors.RESET}")
         
         state = update_step(state, "hub_spoke", "in_progress")
@@ -1169,12 +1169,12 @@ def run_deploy():
                 print(f"\n{Colors.YELLOW}Deployment stopped. Run the script again to retry.{Colors.RESET}")
                 return 1
     else:
-        print_step(3, "Deploy Hub-Spoke Network")
+        print_step(1, "Deploy Hub-Spoke Network")
         print_result(True, "Already completed (skipped)")
     
-    # Step 4: Configure DNS Server
+    # Step 2: Configure DNS Server
     if state["steps"]["dns_install"]["status"] != "completed":
-        print_step(4, "Configure DNS Server")
+        print_step(2, "Configure DNS Server")
         
         state = update_step(state, "dns_install", "in_progress")
         dns_script = SCRIPT_DIR / "hub-spoke-network" / "install-dns-server.ps1"
@@ -1196,12 +1196,12 @@ def run_deploy():
                 state = update_step(state, "dns_install", "pending")
                 return run_deploy()
     else:
-        print_step(4, "Configure DNS Server")
+        print_step(2, "Configure DNS Server")
         print_result(True, "Already completed (skipped)")
     
-    # Step 5: Install VPN Certificates
+    # Step 3: Install VPN Certificates
     if state["steps"]["cert_install"]["status"] != "completed":
-        print_step(5, "Install VPN Certificates")
+        print_step(3, "Install VPN Certificates")
         
         state = update_step(state, "cert_install", "in_progress")
         cert_script = SCRIPT_DIR / "hub-spoke-network" / "install-vpn-certs.ps1"
@@ -1223,12 +1223,12 @@ def run_deploy():
                 state = update_step(state, "cert_install", "pending")
                 return run_deploy()
     else:
-        print_step(5, "Install VPN Certificates")
+        print_step(3, "Install VPN Certificates")
         print_result(True, "Already completed (skipped)")
     
-    # Step 6: Install VPN Client (optional but retryable)
+    # Step 4: Install VPN Client (optional but retryable)
     if state["steps"]["vpn_client"]["status"] not in ("completed", "skipped"):
-        print_step(6, "Install VPN Client (Optional)")
+        print_step(4, "Install VPN Client (Optional)")
         
         if confirm("Download and install VPN client now?"):
             state = update_step(state, "vpn_client", "in_progress")
@@ -1309,11 +1309,11 @@ def run_deploy():
             state = update_step(state, "vpn_client", "skipped")
             print(f"  {Colors.YELLOW}VPN client skipped. Manual install instructions in README.{Colors.RESET}")
     else:
-        print_step(6, "Install VPN Client (Optional)")
+        print_step(4, "Install VPN Client (Optional)")
         print_result(True, "Already completed (skipped)")
     
-    # Step 7: Deploy BYO VNet AI Foundry
-    print_step(7, "Deploy AI Foundry (BYO VNet)")
+    # Step 5: Deploy BYO VNet AI Foundry
+    print_step(5, "Deploy AI Foundry (BYO VNet)")
     
     if state["steps"]["byo_vnet"]["status"] != "completed":
         if confirm("Deploy BYO VNet AI Foundry resources? (20-30 min)"):
