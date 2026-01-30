@@ -85,6 +85,9 @@ hublauncher_*/
 .deployment-state.json
 logs/
 
+# Design documentation (internal only)
+DESIGN.md
+
 # Node
 node_modules/
 npm-debug.log*

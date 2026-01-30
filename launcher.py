@@ -816,6 +816,21 @@ def check_prerequisites():
     if not login_check["installed"]:
         results["all_passed"] = False
     
+    # Check OpenSSL (required for VPN certificate installation)
+    openssl_check = {"name": "OpenSSL", "installed": False, "version": None}
+    try:
+        result = subprocess.run(["openssl", "version"], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            match = re.search(r"OpenSSL\s+([\d\.]+)", result.stdout)
+            if match:
+                openssl_check["installed"] = True
+                openssl_check["version"] = match.group(1)
+    except Exception:
+        pass
+    results["details"].append(openssl_check)
+    if not openssl_check["installed"]:
+        results["all_passed"] = False
+    
     return results
 
 
@@ -828,13 +843,95 @@ def show_prerequisites(results):
         else:
             print(f"  {Colors.RED}[FAIL] {check['name']} - not found{Colors.RESET}")
     
-    if not results["all_passed"]:
-        print(f"\n{Colors.YELLOW}To install missing prerequisites:{Colors.RESET}")
-        print(f"{Colors.GRAY}  Terraform: winget install Hashicorp.Terraform{Colors.RESET}")
-        print(f"{Colors.GRAY}  Azure CLI: winget install Microsoft.AzureCLI{Colors.RESET}")
-        print(f"{Colors.GRAY}  Login:     az login{Colors.RESET}")
-    
     return results["all_passed"]
+
+
+def get_missing_prerequisites(results):
+    """Get list of missing prerequisites that can be auto-installed."""
+    missing = []
+    install_commands = {
+        "Terraform": "Hashicorp.Terraform",
+        "Azure CLI": "Microsoft.AzureCLI",
+        "OpenSSL": "FireDaemon.OpenSSL",
+    }
+    
+    for check in results["details"]:
+        if not check["installed"] and check["name"] in install_commands:
+            missing.append({
+                "name": check["name"],
+                "winget_id": install_commands[check["name"]]
+            })
+    
+    return missing
+
+
+def install_prerequisites(missing):
+    """Install missing prerequisites using winget."""
+    print(f"\n{Colors.CYAN}Installing missing prerequisites...{Colors.RESET}")
+    
+    for item in missing:
+        print(f"\n  {Colors.YELLOW}Installing {item['name']}...{Colors.RESET}")
+        print(f"  {Colors.GRAY}Running: winget install {item['winget_id']}{Colors.RESET}")
+        
+        result = subprocess.run(
+            ["winget", "install", "--id", item["winget_id"], "--accept-source-agreements", "--accept-package-agreements"],
+            capture_output=False,  # Show output to user
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"  {Colors.GREEN}[OK] {item['name']} installed{Colors.RESET}")
+        else:
+            print(f"  {Colors.RED}[FAIL] {item['name']} installation failed{Colors.RESET}")
+            print(f"  {Colors.YELLOW}Try manually: winget install {item['winget_id']}{Colors.RESET}")
+    
+    # Check if Azure CLI login is needed
+    print(f"\n{Colors.GRAY}Re-checking prerequisites...{Colors.RESET}")
+
+
+def handle_missing_prerequisites(results):
+    """Handle missing prerequisites - offer to install or show manual instructions."""
+    missing = get_missing_prerequisites(results)
+    
+    # Check if only login is missing
+    login_missing = any(c["name"] == "Azure CLI Login" and not c["installed"] for c in results["details"])
+    tools_missing = len(missing) > 0
+    
+    if tools_missing:
+        print(f"\n{Colors.YELLOW}Missing tools can be installed automatically using winget.{Colors.RESET}")
+        print(f"  Tools to install: {', '.join(m['name'] for m in missing)}")
+        
+        if confirm("\n  Install missing tools now?"):
+            install_prerequisites(missing)
+            
+            # Re-check after installation
+            new_results = check_prerequisites()
+            show_prerequisites(new_results)
+            
+            if new_results["all_passed"]:
+                return True
+            
+            # Check if only login is missing now
+            login_missing = any(c["name"] == "Azure CLI Login" and not c["installed"] for c in new_results["details"])
+            if login_missing and all(c["installed"] for c in new_results["details"] if c["name"] != "Azure CLI Login"):
+                print(f"\n{Colors.YELLOW}Tools installed! Please run 'az login' to authenticate.{Colors.RESET}")
+                return False
+            
+            print(f"\n{Colors.RED}Some prerequisites still missing after installation.{Colors.RESET}")
+            return False
+        else:
+            print(f"\n{Colors.YELLOW}Manual installation commands:{Colors.RESET}")
+            for m in missing:
+                print(f"{Colors.GRAY}  winget install {m['winget_id']}{Colors.RESET}")
+            if login_missing:
+                print(f"{Colors.GRAY}  az login{Colors.RESET}")
+            return False
+    
+    if login_missing:
+        print(f"\n{Colors.YELLOW}Please run 'az login' to authenticate with Azure.{Colors.RESET}")
+        return False
+    
+    return True
 
 
 # Terraform Operations
@@ -943,6 +1040,7 @@ def run_powershell_script(script_path, elevated=False, working_dir=None):
         temp_script.write(f'& "{script_path}" 2>&1 | Tee-Object -FilePath "{temp_log.name}"\n')
         temp_script.write(f'$exitCode = $LASTEXITCODE\n')
         temp_script.write(f'"EXIT_CODE:$exitCode" | Add-Content -Path "{temp_log.name}"\n')
+        #temp_script.write(f'Read-Host "Press Enter to close..."\n')
         temp_script.close()
         
         try:
@@ -1258,11 +1356,18 @@ def main():
         # Check prerequisites first
         print(f"\n{Colors.CYAN}Checking prerequisites...{Colors.RESET}")
         prereq_results = check_prerequisites()
+        show_prerequisites(prereq_results)
+        
         if not prereq_results["all_passed"]:
-            show_prerequisites(prereq_results)
-            print(f"\n{Colors.RED}Please install missing prerequisites and run again.{Colors.RESET}")
-            return 1
-        print(f"  {Colors.GREEN}[OK] Prerequisites verified{Colors.RESET}")
+            # Offer to install missing prerequisites
+            if not handle_missing_prerequisites(prereq_results):
+                print(f"\n{Colors.RED}Please install missing prerequisites and run again.{Colors.RESET}")
+                return 1
+            # If we get here, prerequisites were installed successfully
+            print(f"\n{Colors.GREEN}Prerequisites installed successfully!{Colors.RESET}")
+            continue  # Re-check prerequisites
+        
+        print(f"  {Colors.GREEN}All prerequisites verified!{Colors.RESET}")
         
         # Show main menu
         choice = show_main_menu()
