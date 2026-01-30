@@ -23,6 +23,7 @@ HUB_SPOKE_PATH = SCRIPT_DIR / "hub-spoke-network" / "code"
 BYO_VNET_PATH = SCRIPT_DIR / "byo-vnet" / "code"
 VPN_CLIENT_PATH = SCRIPT_DIR / "VpnClient"
 TOTAL_STEPS = 5
+MIN_TERRAFORM_VERSION = "1.10.0"
 
 
 class Colors:
@@ -768,12 +769,27 @@ def show_main_menu():
 
 
 # Prerequisites Check
+def compare_versions(version1, version2):
+    """Compare two version strings. Returns -1, 0, or 1."""
+    v1_parts = [int(x) for x in version1.split('.')]
+    v2_parts = [int(x) for x in version2.split('.')]
+    
+    for i in range(max(len(v1_parts), len(v2_parts))):
+        v1 = v1_parts[i] if i < len(v1_parts) else 0
+        v2 = v2_parts[i] if i < len(v2_parts) else 0
+        if v1 < v2:
+            return -1
+        elif v1 > v2:
+            return 1
+    return 0
+
+
 def check_prerequisites():
     """Check if required tools are installed."""
     results = {"all_passed": True, "details": []}
     
-    # Check Terraform
-    tf_check = {"name": "Terraform", "installed": False, "version": None}
+    # Check Terraform (with minimum version)
+    tf_check = {"name": "Terraform", "installed": False, "version": None, "version_ok": False}
     try:
         result = subprocess.run(["terraform", "--version"], capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
@@ -781,10 +797,13 @@ def check_prerequisites():
             if match:
                 tf_check["installed"] = True
                 tf_check["version"] = match.group(1)
+                # Check minimum version
+                if compare_versions(tf_check["version"], MIN_TERRAFORM_VERSION) >= 0:
+                    tf_check["version_ok"] = True
     except Exception:
         pass
     results["details"].append(tf_check)
-    if not tf_check["installed"]:
+    if not tf_check["installed"] or not tf_check["version_ok"]:
         results["all_passed"] = False
     
     # Check Azure CLI (use shell=True on Windows because az is az.cmd)
@@ -837,7 +856,15 @@ def check_prerequisites():
 def show_prerequisites(results):
     """Display prerequisites check results."""
     for check in results["details"]:
-        if check["installed"]:
+        if check["name"] == "Terraform":
+            # Special handling for Terraform with version check
+            if check["installed"] and check.get("version_ok", True):
+                print(f"  {Colors.GREEN}[OK] {check['name']} - {check['version']} (minimum: {MIN_TERRAFORM_VERSION}){Colors.RESET}")
+            elif check["installed"] and not check.get("version_ok", True):
+                print(f"  {Colors.RED}[FAIL] {check['name']} - {check['version']} (minimum {MIN_TERRAFORM_VERSION} required){Colors.RESET}")
+            else:
+                print(f"  {Colors.RED}[FAIL] {check['name']} - not found (minimum {MIN_TERRAFORM_VERSION} required){Colors.RESET}")
+        elif check["installed"]:
             version = f"- {check['version']}" if check["version"] else ""
             print(f"  {Colors.GREEN}[OK] {check['name']} {version}{Colors.RESET}")
         else:
@@ -847,7 +874,7 @@ def show_prerequisites(results):
 
 
 def get_missing_prerequisites(results):
-    """Get list of missing prerequisites that can be auto-installed."""
+    """Get list of missing prerequisites that can be auto-installed or upgraded."""
     missing = []
     install_commands = {
         "Terraform": "Hashicorp.Terraform",
@@ -856,34 +883,57 @@ def get_missing_prerequisites(results):
     }
     
     for check in results["details"]:
-        if not check["installed"] and check["name"] in install_commands:
-            missing.append({
-                "name": check["name"],
-                "winget_id": install_commands[check["name"]]
-            })
+        if check["name"] in install_commands:
+            if not check["installed"]:
+                missing.append({
+                    "name": check["name"],
+                    "winget_id": install_commands[check["name"]],
+                    "action": "install"
+                })
+            elif check["name"] == "Terraform" and not check.get("version_ok", True):
+                missing.append({
+                    "name": check["name"],
+                    "winget_id": install_commands[check["name"]],
+                    "action": "upgrade",
+                    "current_version": check["version"]
+                })
     
     return missing
 
 
 def install_prerequisites(missing):
-    """Install missing prerequisites using winget."""
-    print(f"\n{Colors.CYAN}Installing missing prerequisites...{Colors.RESET}")
+    """Install or upgrade missing prerequisites using winget."""
+    print(f"\n{Colors.CYAN}Installing/upgrading prerequisites...{Colors.RESET}")
     
     for item in missing:
-        print(f"\n  {Colors.YELLOW}Installing {item['name']}...{Colors.RESET}")
-        print(f"  {Colors.GRAY}Running: winget install {item['winget_id']}{Colors.RESET}")
-        
-        result = subprocess.run(
-            ["winget", "install", "--id", item["winget_id"], "--accept-source-agreements", "--accept-package-agreements"],
-            capture_output=False,  # Show output to user
-            text=True
-        )
+        action = item.get("action", "install")
+        if action == "upgrade":
+            print(f"\n  {Colors.YELLOW}Upgrading {item['name']} (current: {item.get('current_version', 'unknown')}, required: {MIN_TERRAFORM_VERSION})...{Colors.RESET}")
+            print(f"  {Colors.GRAY}Running: winget upgrade {item['winget_id']}{Colors.RESET}")
+            
+            result = subprocess.run(
+                ["winget", "upgrade", "--id", item["winget_id"], "--accept-source-agreements", "--accept-package-agreements"],
+                capture_output=False,
+                text=True
+            )
+        else:
+            print(f"\n  {Colors.YELLOW}Installing {item['name']}...{Colors.RESET}")
+            print(f"  {Colors.GRAY}Running: winget install {item['winget_id']}{Colors.RESET}")
+            
+            result = subprocess.run(
+                ["winget", "install", "--id", item["winget_id"], "--accept-source-agreements", "--accept-package-agreements"],
+                capture_output=False,
+                text=True
+            )
         
         if result.returncode == 0:
-            print(f"  {Colors.GREEN}[OK] {item['name']} installed{Colors.RESET}")
+            print(f"  {Colors.GREEN}[OK] {item['name']} {action}d{Colors.RESET}")
         else:
-            print(f"  {Colors.RED}[FAIL] {item['name']} installation failed{Colors.RESET}")
-            print(f"  {Colors.YELLOW}Try manually: winget install {item['winget_id']}{Colors.RESET}")
+            print(f"  {Colors.RED}[FAIL] {item['name']} {action} failed{Colors.RESET}")
+            if action == "upgrade":
+                print(f"  {Colors.YELLOW}Try manually: winget upgrade {item['winget_id']}{Colors.RESET}")
+            else:
+                print(f"  {Colors.YELLOW}Try manually: winget install {item['winget_id']}{Colors.RESET}")
     
     # Check if Azure CLI login is needed
     print(f"\n{Colors.GRAY}Re-checking prerequisites...{Colors.RESET}")
@@ -912,10 +962,22 @@ def handle_missing_prerequisites(results):
     tools_missing = len(missing) > 0
     
     if tools_missing:
-        print(f"\n{Colors.YELLOW}Missing tools can be installed automatically using winget.{Colors.RESET}")
-        print(f"  Tools to install: {', '.join(m['name'] for m in missing)}")
+        # Build description of what needs to be done
+        installs = [m["name"] for m in missing if m.get("action") == "install"]
+        upgrades = [m["name"] for m in missing if m.get("action") == "upgrade"]
         
-        if confirm("\n  Install missing tools now?"):
+        if installs and upgrades:
+            print(f"\n{Colors.YELLOW}Missing/outdated tools can be fixed automatically using winget.{Colors.RESET}")
+            print(f"  To install: {', '.join(installs)}")
+            print(f"  To upgrade: {', '.join(upgrades)}")
+        elif upgrades:
+            print(f"\n{Colors.YELLOW}Outdated tools can be upgraded automatically using winget.{Colors.RESET}")
+            print(f"  To upgrade: {', '.join(upgrades)}")
+        else:
+            print(f"\n{Colors.YELLOW}Missing tools can be installed automatically using winget.{Colors.RESET}")
+            print(f"  To install: {', '.join(installs)}")
+        
+        if confirm("\n  Install/upgrade now?"):
             install_prerequisites(missing)
             
             # Re-check after installation
@@ -927,7 +989,7 @@ def handle_missing_prerequisites(results):
             
             # Check if only login is missing now
             login_missing = any(c["name"] == "Azure CLI Login" and not c["installed"] for c in new_results["details"])
-            if login_missing and all(c["installed"] for c in new_results["details"] if c["name"] != "Azure CLI Login"):
+            if login_missing and all(c["installed"] and c.get("version_ok", True) for c in new_results["details"] if c["name"] != "Azure CLI Login"):
                 # Offer to run az login
                 if confirm("\n  Login to Azure now?"):
                     if run_azure_login():
@@ -941,9 +1003,12 @@ def handle_missing_prerequisites(results):
             print(f"\n{Colors.RED}Some prerequisites still missing after installation.{Colors.RESET}")
             return False
         else:
-            print(f"\n{Colors.YELLOW}Manual installation commands:{Colors.RESET}")
+            print(f"\n{Colors.YELLOW}Manual commands:{Colors.RESET}")
             for m in missing:
-                print(f"{Colors.GRAY}  winget install {m['winget_id']}{Colors.RESET}")
+                if m.get("action") == "upgrade":
+                    print(f"{Colors.GRAY}  winget upgrade {m['winget_id']}{Colors.RESET}")
+                else:
+                    print(f"{Colors.GRAY}  winget install {m['winget_id']}{Colors.RESET}")
             if login_missing:
                 print(f"{Colors.GRAY}  az login{Colors.RESET}")
             return False
