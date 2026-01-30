@@ -210,6 +210,7 @@ If you prefer manual deployment over the launcher, see the individual module REA
 | Deployment stuck | Check `logs/deploy-*.log` for errors, use Ctrl+C and re-run to resume |
 | VPN certificates fail | Run launcher as Administrator for certificate installation |
 | Destroy fails | Check if resources were already deleted in Azure Portal |
+| BYO VNet deployment fails repeatedly | **Use Destroy option before retrying** - Azure operations may be stuck in a pending state that Terraform cannot recover from. Run Destroy (option 2) to clean up, then Deploy fresh. |
 
 ### Module-Specific Issues
 

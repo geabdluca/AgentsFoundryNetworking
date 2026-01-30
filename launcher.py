@@ -1426,6 +1426,10 @@ def run_deploy():
                 print_result(False, "AI Foundry deployment failed")
                 logger.show_tail(20)
                 
+                # Show troubleshooting hint for repeated failures
+                print(f"\n  {Colors.YELLOW}TIP: If this fails repeatedly, use the Destroy option (2) from the main menu{Colors.RESET}")
+                print(f"  {Colors.YELLOW}     before retrying. Azure operations may be stuck and need cleanup.{Colors.RESET}")
+                
                 if confirm("Retry this step?"):
                     state = update_step(state, "byo_vnet", "pending")
                     return run_deploy()
