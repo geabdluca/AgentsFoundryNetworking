@@ -1,4 +1,13 @@
 # ============================================
+# Subscription Configuration
+# ============================================
+
+variable "subscription_id" {
+  description = "The Azure subscription ID"
+  type        = string
+}
+
+# ============================================
 # Network Configuration Mode
 # ============================================
 # Set use_hub_spoke = true to use the hub-spoke-network deployment

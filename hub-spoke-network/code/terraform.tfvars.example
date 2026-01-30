@@ -25,6 +25,11 @@ tags = {
 hub_vnet_address_space       = "10.0.0.0/16"
 hub_gateway_subnet_prefix    = "10.0.0.0/27"
 hub_dns_subnet_prefix        = "10.0.1.0/24"
+hub_firewall_subnet_prefix   = "10.0.2.0/26"
+
+# Azure Firewall Configuration
+# Set to true to deploy Azure Firewall with route table for agents subnet
+deploy_firewall = false
 
 # Spoke VNet Configuration
 spoke_vnet_address_space                = "10.1.0.0/16"

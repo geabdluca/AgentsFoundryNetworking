@@ -215,3 +215,42 @@ output "next_steps" {
     For detailed instructions, see README.md
   EOT
 }
+
+# ============================================
+# Azure Firewall Outputs (Conditional)
+# ============================================
+
+output "firewall_id" {
+  description = "The ID of the Azure Firewall"
+  value       = var.deploy_firewall ? azurerm_firewall.main[0].id : null
+}
+
+output "firewall_name" {
+  description = "The name of the Azure Firewall"
+  value       = var.deploy_firewall ? azurerm_firewall.main[0].name : null
+}
+
+output "firewall_private_ip" {
+  description = "The private IP address of the Azure Firewall"
+  value       = var.deploy_firewall ? azurerm_firewall.main[0].ip_configuration[0].private_ip_address : null
+}
+
+output "firewall_public_ip" {
+  description = "The public IP address of the Azure Firewall"
+  value       = var.deploy_firewall ? azurerm_public_ip.firewall[0].ip_address : null
+}
+
+output "firewall_policy_id" {
+  description = "The ID of the Azure Firewall Policy"
+  value       = var.deploy_firewall ? azurerm_firewall_policy.main[0].id : null
+}
+
+output "firewall_log_analytics_workspace_id" {
+  description = "The ID of the Log Analytics Workspace for Firewall diagnostics"
+  value       = var.deploy_firewall ? azurerm_log_analytics_workspace.firewall[0].id : null
+}
+
+output "agents_route_table_id" {
+  description = "The ID of the Route Table for the Agents subnet"
+  value       = var.deploy_firewall ? azurerm_route_table.agents[0].id : null
+}

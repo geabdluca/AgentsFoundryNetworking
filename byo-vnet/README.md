@@ -252,11 +252,8 @@ terraform destroy
 # AI Foundry uses soft-delete by default - purging is required before redeploying with same name
 # or before deleting the VNet
 
-# List soft-deleted accounts
-az cognitiveservices account list-deleted --query "[?location=='westus']" -o table
-
-# Purge each account (replace with your actual values from the list above)
-az cognitiveservices account purge --location westus --name <account-name> --resource-group <rg-name>
+# Purge all soft-deleted accounts in westus (one-liner)
+az cognitiveservices account list-deleted --query "[?location=='westus']" -o json | ConvertFrom-Json | ForEach-Object { az cognitiveservices account purge --location $_.location --name $_.name --resource-group $_.resourceGroup }
 ```
 
 ### Destroy Everything (AI Foundry + Hub-Spoke)
@@ -266,9 +263,8 @@ az cognitiveservices account purge --location westus --name <account-name> --res
 cd byo-vnet/code
 terraform destroy
 
-# 2. Purge soft-deleted Cognitive Services
-az cognitiveservices account list-deleted --query "[?location=='westus']" -o table
-az cognitiveservices account purge --location westus --name <account-name> --resource-group <rg-name>
+# 2. Purge all soft-deleted Cognitive Services in westus
+az cognitiveservices account list-deleted --query "[?location=='westus']" -o json | ConvertFrom-Json | ForEach-Object { az cognitiveservices account purge --location $_.location --name $_.name --resource-group $_.resourceGroup }
 
 # 3. Destroy hub-spoke network
 cd ../../hub-spoke-network/code

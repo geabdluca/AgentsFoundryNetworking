@@ -79,6 +79,11 @@ __pycache__/
 .Python
 venv/
 ENV/
+hublauncher_*/
+
+# Launcher state and logs
+.deployment-state.json
+logs/
 
 # Node
 node_modules/
@@ -105,3 +110,7 @@ _site/
 # Backup files
 *.bak
 *~
+
+# Experimental/WIP folders (not ready for release)
+ai-foundry-managed-vnet/
+foundry-mvnet-sample/

@@ -1,77 +1,118 @@
-# Azure AI Foundry with Private Network
+﻿# Azure AI Foundry Network Deployer
 
-Deploy Azure AI Foundry with full network isolation using a hub-spoke network topology and BYO (Bring Your Own) VNet approach.
+One-click deployment solution for Azure AI Foundry with full network isolation using a hub-spoke topology.
 
-## Documentation
+## Overview
 
-| Module | Description |
-|--------|-------------|
-| **[Hub-Spoke Network](./hub-spoke-network/README.md)** | VPN Gateway, DNS Server, Private DNS Zones, VNet Peering |
-| **[BYO VNet AI Foundry](./byo-vnet/README.md)** | AI Foundry, Cosmos DB, AI Search, Storage with Private Endpoints |
+This project provides an automated launcher that deploys a complete, production-ready Azure AI Foundry environment with:
 
----
+- **Hub-Spoke Network** - VPN Gateway, DNS Server, Private DNS Zones
+- **AI Foundry Resources** - AI Foundry Account, Cosmos DB, AI Search, Storage
+- **Private Connectivity** - All resources secured with Private Endpoints
+- **VPN Access** - Point-to-Site VPN for secure remote access
 
 ## Quick Start
 
-### Step 1: Deploy Hub-Spoke Network (~30-60 min)
+### Prerequisites
+
+- **Windows 10/11** with PowerShell
+- **Python 3.8+** 
+- **Terraform** - `winget install Hashicorp.Terraform`
+- **Azure CLI** - `winget install Microsoft.AzureCLI`
+- **Azure Subscription** with Owner/Contributor permissions
 
 ```powershell
-cd hub-spoke-network/code
-
-# Configure
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your subscription_id and location
-
-# Deploy
-terraform init
-terraform apply
+# Login to Azure
+az login
 ```
 
-### Step 2: Configure DNS & VPN
+### Run the Launcher
 
 ```powershell
-# Go back to hub-spoke-network root (scripts are there)
-cd ..
+# Create virtual environment (first time only)
+python -m venv hublauncher_v0.1.0
 
-# Install DNS Server on the DNS VM
-.\install-dns-server.ps1
-
-# Install VPN certificates (run as Administrator)
-Start-Process powershell -Verb RunAs -ArgumentList "-NoExit", "-Command", "cd '$PWD'; .\install-vpn-certs.ps1"
-
-# Download and install VPN client
-cd code
-$rgName = terraform output -raw resource_group_name
-$vpnGwId = terraform output -raw vpn_gateway_id
-$vpnGwName = $vpnGwId.Split('/')[-1]
-$url = az network vnet-gateway vpn-client generate --resource-group $rgName --name $vpnGwName --processor-architecture Amd64 --output tsv
-Invoke-WebRequest -Uri $url -OutFile "../VpnClient.zip"
-Expand-Archive -Path "../VpnClient.zip" -DestinationPath "../VpnClient" -Force
-..\VpnClient\WindowsAmd64\VpnClientSetupAmd64.exe
+# Activate and run
+.\hublauncher_v0.1.0\Scripts\Activate.ps1
+python launcher.py
 ```
 
-### Step 3: Deploy AI Foundry (~20-30 min)
+The launcher presents a menu-driven interface:
 
-```powershell
-cd ../byo-vnet/code
+```
+================================================================
+         Azure AI Foundry Network Deployer v1.0                 
+================================================================
 
-# Configure (location auto-detected from hub-spoke)
-cp example.tfvars terraform.tfvars
-# Edit terraform.tfvars - set location to match hub-spoke
+=== Main Menu ===
 
-# Deploy
-$env:ARM_SUBSCRIPTION_ID = "your-subscription-id"
-terraform init
-terraform apply
+  Options:
+    [1] Deploy - Start or resume deployment
+    [2] Destroy - Remove deployed resources
+    [0] Quit
+
+  Select option:
 ```
 
-### Step 4: Connect & Test
+---
 
-1. Connect to VPN
-2. Test DNS resolution:
-   ```powershell
-   nslookup <ai foundry name>.services.ai.azure.com
-   ```
+## Launcher Features
+
+### Deploy Workflow
+
+The **Deploy** option guides you through a 7-step automated deployment:
+
+| Step | Description | Duration |
+|------|-------------|----------|
+| 1 | Prerequisites Check | ~10 sec |
+| 2 | Configuration (subscription, region, firewall) | Interactive |
+| 3 | Deploy Hub-Spoke Network | 45-60 min |
+| 4 | Configure DNS Server | ~2 min |
+| 5 | Install VPN Certificates | ~30 sec |
+| 6 | Install VPN Client (optional) | ~2 min |
+| 7 | Deploy AI Foundry (BYO VNet) | 20-30 min |
+
+**Features:**
+- Automatic retry on transient failures
+- Resume capability - restart from where you left off
+- Progress saved to `.deployment-state.json`
+- Detailed logging in `logs/` folder
+
+### Destroy Workflow
+
+The **Destroy** option provides safe cleanup with two modes:
+
+| Option | Description |
+|--------|-------------|
+| **BYO VNet Only** | Remove AI Foundry resources, keep hub-spoke network for reuse |
+| **Destroy ALL** | Remove everything (AI Foundry + Hub-Spoke Network) |
+
+**Features:**
+- Automatic Cognitive Services purge (handles soft-delete)
+- VPN client and connection cleanup
+- Terraform state cleanup (keeps provider cache for speed)
+- Fallback to resource group deletion if terraform destroy fails
+
+### State Management
+
+The launcher tracks deployment progress in `.deployment-state.json`:
+
+```json
+{
+  "subscription_id": "...",
+  "location": "eastus",
+  "steps": {
+    "hub_spoke": {"status": "completed"},
+    "dns_install": {"status": "completed"},
+    "byo_vnet": {"status": "pending"}
+  }
+}
+```
+
+This enables:
+- Resume interrupted deployments
+- Know what's deployed for cleanup
+- Skip already-completed steps
 
 ---
 
@@ -84,17 +125,17 @@ terraform apply
 │   │ VPN Gateway  │              │    DNS VM       │        │
 │   │   (P2S)      │              │   10.0.1.4      │        │
 │   └──────────────┘              └─────────────────┘        │
-└────────────────────────────┬────────────────────────────────┘
-                             │ VNet Peering
-┌────────────────────────────▼────────────────────────────────┐
+└────────────────────────────────┬────────────────────────────┘
+                                 │ VNet Peering
+┌────────────────────────────────▼────────────────────────────┐
 │                  Spoke VNet (10.1.0.0/16)                   │
 │   ┌──────────────────┐         ┌──────────────────┐        │
 │   │ Private Endpoints│         │ Agents Subnet    │        │
 │   │ Subnet           │         │ (Delegated)      │        │
 │   └──────────────────┘         └──────────────────┘        │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-┌────────────────────────────▼────────────────────────────────┐
+└────────────────────────────────┬────────────────────────────┘
+                                 │
+┌────────────────────────────────▼────────────────────────────┐
 │              AI Foundry Resources (New RG)                  │
 │                                                             │
 │  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐  │
@@ -104,50 +145,37 @@ terraform apply
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Folder Structure
+---
+
+## Project Structure
 
 ```
 AgentsFoundryNetworking/
-├── hub-spoke-network/          # Step 1: Network infrastructure
-│   ├── README.md               # Detailed network setup guide
+├── launcher.py                 # Main launcher application
+├── .deployment-state.json      # Deployment state (auto-generated)
+├── logs/                       # Deployment logs (auto-generated)
+│
+├── hub-spoke-network/          # Network infrastructure module
+│   ├── README.md               # Detailed network documentation
 │   ├── install-dns-server.ps1  # DNS configuration script
 │   ├── install-vpn-certs.ps1   # VPN certificate script
 │   └── code/                   # Terraform code
-│       ├── terraform.tfvars    # Your configuration
-│       └── *.tf
 │
-└── byo-vnet/                   # Step 2: AI Foundry resources
-    ├── README.md               # AI Foundry deployment guide
-    ├── deploy-byo-vnet.ps1     # Automated deployment script
-    └── code/
-        ├── terraform.tfvars
-        └── *.tf
+└── byo-vnet/                   # AI Foundry resources module
+    ├── README.md               # AI Foundry documentation
+    └── code/                   # Terraform code
 ```
 
-## What Gets Deployed
+---
 
-### Hub-Spoke Network
-| Resource | Purpose |
-|----------|---------|
-| Hub VNet | Central connectivity |
-| Spoke VNet | AI Foundry resources |
-| VPN Gateway | Remote access |
-| DNS VM | Private DNS resolution |
-| Private DNS Zones | 12 zones for Azure services |
-| VNet Peering | Hub-spoke connectivity |
-| Azure Firewall | *(Optional)* Route agent traffic for inspection |
+## Documentation
 
-### AI Foundry (BYO VNet)
-| Resource | Purpose |
-|----------|---------|
-| Resource Group | New RG for AI resources |
-| AI Foundry Account | AI services hub |
-| AI Foundry Project | Workspace for agents |
-| Cosmos DB | Thread/agent state storage |
-| AI Search | Vector embeddings |
-| Storage Account | Agent data |
-| Private Endpoints | Secure connectivity |
-| GPT-4o Deployment | AI model |
+| Module | Description |
+|--------|-------------|
+| **[Hub-Spoke Network](./hub-spoke-network/README.md)** | Network infrastructure, VPN setup, DNS configuration |
+| **[BYO VNet AI Foundry](./byo-vnet/README.md)** | AI Foundry resources, private endpoints, custom VNet option |
+
+---
 
 ## Estimated Costs
 
@@ -161,39 +189,44 @@ AgentsFoundryNetworking/
 | Azure Firewall *(optional)* | ~$900 |
 | **Total** | **~$610/month** (or ~$1,510 with firewall) |
 
+---
+
+## Manual Deployment
+
+If you prefer manual deployment over the launcher, see the individual module READMEs:
+
+1. [Hub-Spoke Network Manual Setup](./hub-spoke-network/README.md#quick-start)
+2. [BYO VNet AI Foundry Manual Setup](./byo-vnet/README.md)
+
+---
+
 ## Troubleshooting
 
-See the troubleshooting sections in each module's README:
+### Launcher Issues
+
+| Issue | Solution |
+|-------|----------|
+| Prerequisites check fails | Run `az login` and verify tools with `terraform --version` |
+| Deployment stuck | Check `logs/deploy-*.log` for errors, use Ctrl+C and re-run to resume |
+| VPN certificates fail | Run launcher as Administrator for certificate installation |
+| Destroy fails | Check if resources were already deleted in Azure Portal |
+
+### Module-Specific Issues
+
 - [Hub-Spoke Troubleshooting](./hub-spoke-network/README.md#troubleshooting)
 - [BYO VNet Troubleshooting](./byo-vnet/README.md#troubleshooting)
 
-## Clean Up
+---
 
-### Destroy AI Foundry Only (Keep Hub-Spoke for Reuse)
-```powershell
-cd byo-vnet/code
-terraform destroy
+## Contributing
 
-# Purge soft-deleted Cognitive Services (required before redeploying or deleting VNet)
-az cognitiveservices account list-deleted --query "[?location=='westus']" -o table
-az cognitiveservices account purge --location westus --name <account-name> --resource-group <rg-name>
-```
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
-### Destroy Everything
-```powershell
-# 1. Destroy AI Foundry
-cd byo-vnet/code
-terraform destroy
+---
 
-# 2. Purge soft-deleted Cognitive Services
-az cognitiveservices account list-deleted --query "[?location=='westus']" -o table
-az cognitiveservices account purge --location westus --name <account-name> --resource-group <rg-name>
+## License
 
-# 3. Destroy hub-spoke network
-cd ../../hub-spoke-network/code
-terraform destroy
-```
-
-> ⚠️ **Important**: AI Foundry uses soft-delete by default. Purging is required before the VNet can be deleted or before redeploying with the same name.
-
-> ⚠️ VPN Gateway deletion takes 15-20 minutes.
+MIT License - see LICENSE file for details.

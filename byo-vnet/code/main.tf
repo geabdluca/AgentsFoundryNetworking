@@ -15,7 +15,7 @@ resource "random_string" "unique" {
 ## Create resource group for AI Foundry resources
 ##
 resource "azurerm_resource_group" "foundry" {
-  name     = var.resource_group_name
+  name     = "${var.resource_group_name}-${random_string.unique.result}"
   location = var.location
 
   tags = merge(
@@ -478,10 +478,6 @@ resource "azapi_resource" "conn_storage" {
       }
     }
   }
-
-  response_export_values = [
-    "identity.principalId"
-  ]
 }
 
 ## Create the AI Foundry project connection to AI Search
@@ -510,10 +506,6 @@ resource "azapi_resource" "conn_aisearch" {
       }
     }
   }
-
-  response_export_values = [
-    "identity.principalId"
-  ]
 }
 
 ## Create the necessary role assignments for the AI Foundry project over the resources used to store agent data
