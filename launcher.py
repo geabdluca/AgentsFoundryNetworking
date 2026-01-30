@@ -672,7 +672,7 @@ def confirm_destroy(destroy_type, state):
     confirm_text = "DESTROY"
     response = input(f"\n{Colors.YELLOW}Type '{confirm_text}' to confirm: {Colors.RESET}").strip()
     
-    return response == confirm_text
+    return response.upper() == confirm_text
 
 
 def run_destroy():
