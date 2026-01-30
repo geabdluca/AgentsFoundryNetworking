@@ -889,6 +889,20 @@ def install_prerequisites(missing):
     print(f"\n{Colors.GRAY}Re-checking prerequisites...{Colors.RESET}")
 
 
+def run_azure_login():
+    """Run az login interactively."""
+    print(f"\n{Colors.CYAN}Starting Azure login...{Colors.RESET}")
+    print(f"  {Colors.GRAY}A browser window will open for authentication.{Colors.RESET}")
+    
+    result = subprocess.run(
+        "az login",
+        shell=True,
+        capture_output=False  # Show output to user
+    )
+    
+    return result.returncode == 0
+
+
 def handle_missing_prerequisites(results):
     """Handle missing prerequisites - offer to install or show manual instructions."""
     missing = get_missing_prerequisites(results)
@@ -914,7 +928,14 @@ def handle_missing_prerequisites(results):
             # Check if only login is missing now
             login_missing = any(c["name"] == "Azure CLI Login" and not c["installed"] for c in new_results["details"])
             if login_missing and all(c["installed"] for c in new_results["details"] if c["name"] != "Azure CLI Login"):
-                print(f"\n{Colors.YELLOW}Tools installed! Please run 'az login' to authenticate.{Colors.RESET}")
+                # Offer to run az login
+                if confirm("\n  Login to Azure now?"):
+                    if run_azure_login():
+                        return True
+                    else:
+                        print(f"\n{Colors.RED}Azure login failed. Please try 'az login' manually.{Colors.RESET}")
+                        return False
+                print(f"\n{Colors.YELLOW}Please run 'az login' to authenticate.{Colors.RESET}")
                 return False
             
             print(f"\n{Colors.RED}Some prerequisites still missing after installation.{Colors.RESET}")
@@ -928,6 +949,12 @@ def handle_missing_prerequisites(results):
             return False
     
     if login_missing:
+        if confirm("\n  Login to Azure now?"):
+            if run_azure_login():
+                return True
+            else:
+                print(f"\n{Colors.RED}Azure login failed. Please try 'az login' manually.{Colors.RESET}")
+                return False
         print(f"\n{Colors.YELLOW}Please run 'az login' to authenticate with Azure.{Colors.RESET}")
         return False
     
