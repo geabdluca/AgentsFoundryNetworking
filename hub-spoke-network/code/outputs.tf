@@ -74,6 +74,11 @@ output "spoke_delegated_subnet_id" {
 # VPN Gateway Outputs
 # ============================================
 
+output "vpn_gateway_name" {
+  description = "The name of the VPN Gateway"
+  value       = azurerm_virtual_network_gateway.vpn.name
+}
+
 output "vpn_gateway_id" {
   description = "The ID of the VPN Gateway"
   value       = azurerm_virtual_network_gateway.vpn.id

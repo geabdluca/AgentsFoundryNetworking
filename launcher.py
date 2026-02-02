@@ -97,20 +97,60 @@ def print_result(success, message):
         logger.log(f"FAILED: {message}", "ERROR")
 
 
-def print_completion(log_path):
-    """Display completion banner."""
-    print(f"""
-{Colors.GREEN}================================================================
-  DEPLOYMENT COMPLETE
-  
-  Next Steps:
-  1. Connect to VPN using Azure VPN Client
-  2. Test DNS: nslookup <resource>.services.ai.azure.com
-  3. Access AI Foundry: https://ai.azure.com
-  
-  Log file: {log_path}
-================================================================{Colors.RESET}
-""")
+def print_completion(log_path, state):
+    """Display completion banner with resource links."""
+    # Get resource info
+    byo_info = get_byo_resource_info(state)
+    foundry_name = get_terraform_output(BYO_VNET_PATH, "ai_foundry_name")
+    project_name = get_terraform_output(BYO_VNET_PATH, "ai_foundry_project_name")
+    vpn_name = get_terraform_output(HUB_SPOKE_PATH, "vpn_gateway_name")
+    hub_info = get_hub_spoke_resource_info(state)
+    
+    # Get tenant ID from Azure CLI
+    tenant_id = ""
+    try:
+        result = subprocess.run(
+            ["az", "account", "show", "--query", "tenantId", "-o", "tsv"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            tenant_id = result.stdout.strip()
+    except Exception:
+        pass
+    
+    print(f"\n{Colors.GREEN}================================================================")
+    print(f"  DEPLOYMENT COMPLETE")
+    print(f"================================================================{Colors.RESET}")
+    
+    print(f"\n  {Colors.CYAN}Resources Created:{Colors.RESET}")
+    
+    # Hub-Spoke RG
+    if hub_info["resource_group"]:
+        hub_rg_url = f"https://portal.azure.com/#@/resource/subscriptions/{state['subscription_id']}/resourceGroups/{hub_info['resource_group']}/overview"
+        print(f"  Hub-Spoke RG: {hub_info['resource_group']}")
+        print(f"    {Colors.GRAY}{hub_rg_url}{Colors.RESET}")
+    
+    # AI Foundry RG
+    if byo_info["resource_group"] and byo_info["resource_group"] != "rg-aifoundry-resources":
+        foundry_rg_url = f"https://portal.azure.com/#@/resource/subscriptions/{state['subscription_id']}/resourceGroups/{byo_info['resource_group']}/overview"
+        print(f"  AI Foundry RG: {byo_info['resource_group']}")
+        print(f"    {Colors.GRAY}{foundry_rg_url}{Colors.RESET}")
+    
+    # AI Foundry Portal link
+    if foundry_name and project_name and tenant_id:
+        foundry_url = f"https://ai.azure.com/foundryProject/overview?wsid=/subscriptions/{state['subscription_id']}/resourceGroups/{byo_info['resource_group']}/providers/Microsoft.CognitiveServices/accounts/{foundry_name}/projects/{project_name}&tid={tenant_id}"
+        print(f"\n  {Colors.CYAN}AI Foundry Project:{Colors.RESET} {project_name}")
+        print(f"    {Colors.GRAY}{foundry_url}{Colors.RESET}")
+    
+    print(f"\n  {Colors.CYAN}Next Steps:{Colors.RESET}")
+    if vpn_name:
+        print(f"  1. Connect to VPN '{vpn_name}' using Azure VPN Client")
+    else:
+        print(f"  1. Connect to VPN using Azure VPN Client")
+    print(f"  2. Access AI Foundry: https://ai.azure.com")
+    
+    print(f"\n  {Colors.GRAY}Log file: {log_path}{Colors.RESET}")
+    print(f"{Colors.GREEN}================================================================{Colors.RESET}\n")
 
 
 def confirm(prompt, default=True):
@@ -173,6 +213,13 @@ def create_state(subscription_id, location, deploy_firewall):
         "location": location,
         "deploy_firewall": deploy_firewall,
         "created_at": datetime.now().isoformat(),
+        "resources": {
+            "hub_spoke_rg": None,
+            "vpn_gateway_name": None,
+            "byo_vnet_rg": None,
+            "ai_foundry_name": None,
+            "ai_foundry_project_name": None,
+        },
         "steps": {
             "hub_spoke": {"status": "pending", "timestamp": None},
             "dns_install": {"status": "pending", "timestamp": None},
@@ -248,10 +295,22 @@ def run_terraform_destroy(working_dir, subscription_id, log_file):
 
 def delete_resource_group(rg_name, subscription_id, log_file):
     """Delete an Azure resource group."""
+    print(f"  {Colors.GRAY}Checking if resource group {rg_name} exists...{Colors.RESET}")
+    
+    # Check if RG exists first
+    check = subprocess.run(
+        f'az group exists --name "{rg_name}" --subscription "{subscription_id}"',
+        capture_output=True, text=True, shell=True
+    )
+    
+    if check.stdout.strip().lower() == "false":
+        print(f"  {Colors.GRAY}Resource group already deleted or doesn't exist{Colors.RESET}")
+        return True, "Resource group already deleted"
+    
     print(f"  {Colors.GRAY}Deleting resource group {rg_name}...{Colors.RESET}")
     
     result = subprocess.run(
-        f'az group delete --name "{rg_name}" --subscription "{subscription_id}" --yes --no-wait --debug',
+        f'az group delete --name "{rg_name}" --subscription "{subscription_id}" --yes --no-wait',
         capture_output=True, text=True, shell=True
     )
     
@@ -261,9 +320,9 @@ def delete_resource_group(rg_name, subscription_id, log_file):
     if result.returncode != 0:
         return False, result.stderr
     
-    # Wait for deletion to complete
+    # Wait for deletion to complete (VPN Gateway deletion can take 15-20 min)
     print(f"  {Colors.GRAY}Waiting for resource group deletion...{Colors.RESET}")
-    for i in range(60):  # Wait up to 10 minutes
+    for i in range(120):  # Wait up to 20 minutes
         check = subprocess.run(
             f'az group exists --name "{rg_name}" --subscription "{subscription_id}"',
             capture_output=True, text=True, shell=True
@@ -414,36 +473,55 @@ def remove_vpn_connection_profile(log_file):
     return removed
 
 
+def get_terraform_output(tf_dir, output_name):
+    """Get a single terraform output value by reading state file directly."""
+    try:
+        state_file = tf_dir / "terraform.tfstate"
+        if not state_file.exists():
+            return None
+        
+        with open(state_file, "r", encoding="utf-8") as f:
+            tf_state = json.load(f)
+        
+        outputs = tf_state.get("outputs", {})
+        if output_name in outputs:
+            return outputs[output_name].get("value")
+        return None
+    except Exception:
+        return None
+
+
 def get_byo_resource_info(state):
-    """Get BYO VNet resource information from terraform state or output."""
+    """Get BYO VNet resource information by reading terraform state file directly."""
     info = {
         "resource_group": "rg-aifoundry-resources",  # Default
         "ai_foundry_name": None,
         "location": state.get("location", "westus")
     }
     
-    # Try to get from terraform output
+    # First check if saved in deployment state
+    if state.get("resources", {}).get("byo_vnet_rg"):
+        info["resource_group"] = state["resources"]["byo_vnet_rg"]
+    if state.get("resources", {}).get("ai_foundry_name"):
+        info["ai_foundry_name"] = state["resources"]["ai_foundry_name"]
+        return info  # If we have saved state, use it
+    
+    # Fall back to terraform state file
     try:
-        original_dir = os.getcwd()
-        os.chdir(BYO_VNET_PATH)
+        state_file = BYO_VNET_PATH / "terraform.tfstate"
+        if not state_file.exists():
+            return info
         
-        # Get AI Foundry name
-        result = subprocess.run(
-            ["terraform", "output", "-raw", "ai_foundry_name"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            info["ai_foundry_name"] = result.stdout.strip()
+        with open(state_file, "r", encoding="utf-8") as f:
+            tf_state = json.load(f)
         
-        # Get resource group name
-        result = subprocess.run(
-            ["terraform", "output", "-raw", "resource_group_name"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            info["resource_group"] = result.stdout.strip()
+        outputs = tf_state.get("outputs", {})
         
-        os.chdir(original_dir)
+        if "ai_foundry_name" in outputs:
+            info["ai_foundry_name"] = outputs["ai_foundry_name"].get("value")
+        
+        if "resource_group_name" in outputs:
+            info["resource_group"] = outputs["resource_group_name"].get("value")
     except Exception:
         pass
     
@@ -451,25 +529,30 @@ def get_byo_resource_info(state):
 
 
 def get_hub_spoke_resource_info(state):
-    """Get Hub-Spoke resource information from terraform state or output."""
+    """Get Hub-Spoke resource information by reading terraform state file directly."""
     info = {
         "resource_group": None,
         "location": state.get("location", "westus")
     }
     
-    # Try to get from terraform output
+    # First check if saved in deployment state
+    if state.get("resources", {}).get("hub_spoke_rg"):
+        info["resource_group"] = state["resources"]["hub_spoke_rg"]
+        return info
+    
+    # Fall back to terraform state file
     try:
-        original_dir = os.getcwd()
-        os.chdir(HUB_SPOKE_PATH)
+        state_file = HUB_SPOKE_PATH / "terraform.tfstate"
+        if not state_file.exists():
+            return info
         
-        result = subprocess.run(
-            ["terraform", "output", "-raw", "resource_group_name"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            info["resource_group"] = result.stdout.strip()
+        with open(state_file, "r", encoding="utf-8") as f:
+            tf_state = json.load(f)
         
-        os.chdir(original_dir)
+        outputs = tf_state.get("outputs", {})
+        
+        if "resource_group_name" in outputs:
+            info["resource_group"] = outputs["resource_group_name"].get("value")
     except Exception:
         pass
     
@@ -528,8 +611,13 @@ def destroy_byo_vnet(state, log_file):
     else:
         print(f"  {Colors.GRAY}No state files to remove{Colors.RESET}")
     
-    # Update state
+    # Update state - reset step and clear resource info
     state = update_step(state, "byo_vnet", "pending")
+    if "resources" in state:
+        state["resources"]["byo_vnet_rg"] = None
+        state["resources"]["ai_foundry_name"] = None
+        state["resources"]["ai_foundry_project_name"] = None
+        save_state(state)
     
     print(f"\n{Colors.GREEN}BYO VNet destruction complete!{Colors.RESET}")
     logger.log("BYO VNet destruction completed")
@@ -591,11 +679,15 @@ def destroy_hub_spoke(state, log_file):
     else:
         print(f"  {Colors.GRAY}No VPN connections found{Colors.RESET}")
     
-    # Update state - reset all steps
+    # Update state - reset all steps and clear resource info
     state = update_step(state, "hub_spoke", "pending")
     state = update_step(state, "dns_install", "pending")
     state = update_step(state, "cert_install", "pending")
     state = update_step(state, "vpn_client", "pending")
+    if "resources" in state:
+        state["resources"]["hub_spoke_rg"] = None
+        state["resources"]["vpn_gateway_name"] = None
+        save_state(state)
     
     print(f"\n{Colors.GREEN}Hub-Spoke destruction complete!{Colors.RESET}")
     logger.log("Hub-Spoke destruction completed")
@@ -762,6 +854,10 @@ def show_main_menu():
                 return "destroy"
             else:
                 print(f"  {Colors.YELLOW}No resources to destroy.{Colors.RESET}")
+                print(f"\n  {Colors.YELLOW}Options:{Colors.RESET}")
+                print(f"    [1] Deploy - Start or resume deployment")
+                print(f"    {Colors.GRAY}[2] Destroy - No resources to destroy{Colors.RESET}")
+                print(f"    [0] Quit")
         elif choice == "0":
             return "quit"
         else:
@@ -1173,14 +1269,6 @@ def run_deploy():
     log_file = logger.initialize()
     logger.log(f"Script started from: {SCRIPT_DIR}")
     
-    # Prerequisites (not a numbered step)
-    print(f"\n{Colors.CYAN}=== Prerequisites Check ==={Colors.RESET}")
-    prereq_results = check_prerequisites()
-    if not show_prerequisites(prereq_results):
-        print(f"\n{Colors.RED}Please install missing prerequisites and run again.{Colors.RESET}")
-        return 1
-    print_result(True, "All prerequisites met")
-    
     # Check for existing deployment
     state = None
     if has_previous_deployment():
@@ -1249,6 +1337,25 @@ def run_deploy():
         if result["success"]:
             state = update_step(state, "hub_spoke", "completed")
             print_result(True, "Hub-Spoke network deployed")
+            
+            # Show resource info and save to state
+            hub_info = get_hub_spoke_resource_info(state)
+            vpn_name = get_terraform_output(HUB_SPOKE_PATH, "vpn_gateway_name")
+            
+            # Save resource names to state for destroy
+            if "resources" not in state:
+                state["resources"] = {}
+            state["resources"]["hub_spoke_rg"] = hub_info["resource_group"]
+            state["resources"]["vpn_gateway_name"] = vpn_name
+            save_state(state)
+            
+            if hub_info["resource_group"]:
+                rg_url = f"https://portal.azure.com/#@/resource/subscriptions/{state['subscription_id']}/resourceGroups/{hub_info['resource_group']}/overview"
+                print(f"\n  {Colors.CYAN}Resource Group:{Colors.RESET} {hub_info['resource_group']}")
+                print(f"  {Colors.CYAN}Azure Portal:{Colors.RESET} {rg_url}")
+            if vpn_name:
+                print(f"  {Colors.CYAN}VPN Gateway:{Colors.RESET} {vpn_name}")
+                print(f"\n  {Colors.YELLOW}Note: After completing all steps, connect to VPN '{vpn_name}' to access resources.{Colors.RESET}")
         else:
             state = update_step(state, "hub_spoke", "failed")
             print_result(False, "Hub-Spoke deployment failed")
@@ -1421,6 +1528,19 @@ def run_deploy():
             if result["success"]:
                 state = update_step(state, "byo_vnet", "completed")
                 print_result(True, "AI Foundry deployed")
+                
+                # Save resource names to state for destroy
+                byo_info = get_byo_resource_info(state)
+                foundry_name = get_terraform_output(BYO_VNET_PATH, "ai_foundry_name")
+                project_name = get_terraform_output(BYO_VNET_PATH, "ai_foundry_project_name")
+                rg_name = get_terraform_output(BYO_VNET_PATH, "resource_group_name")
+                
+                if "resources" not in state:
+                    state["resources"] = {}
+                state["resources"]["byo_vnet_rg"] = rg_name or byo_info["resource_group"]
+                state["resources"]["ai_foundry_name"] = foundry_name
+                state["resources"]["ai_foundry_project_name"] = project_name
+                save_state(state)
             else:
                 state = update_step(state, "byo_vnet", "failed")
                 print_result(False, "AI Foundry deployment failed")
@@ -1440,31 +1560,35 @@ def run_deploy():
         print_result(True, "Already completed (skipped)")
     
     # Completion
-    print_completion(log_file)
+    print_completion(log_file, state)
     return 0
 
 
 def main():
     """Main entry point with menu."""
-    while True:
-        print_banner()
-        
-        # Check prerequisites first
-        print(f"\n{Colors.CYAN}Checking prerequisites...{Colors.RESET}")
+    print_banner()
+    
+    # Check prerequisites once at startup
+    print(f"\n{Colors.CYAN}Checking prerequisites...{Colors.RESET}")
+    prereq_results = check_prerequisites()
+    show_prerequisites(prereq_results)
+    
+    while not prereq_results["all_passed"]:
+        # Offer to install missing prerequisites
+        if not handle_missing_prerequisites(prereq_results):
+            print(f"\n{Colors.RED}Please install missing prerequisites and run again.{Colors.RESET}")
+            return 1
+        # If we get here, prerequisites were installed successfully
+        print(f"\n{Colors.GREEN}Prerequisites installed successfully!{Colors.RESET}")
+        # Re-check prerequisites
+        print(f"\n{Colors.CYAN}Re-checking prerequisites...{Colors.RESET}")
         prereq_results = check_prerequisites()
         show_prerequisites(prereq_results)
-        
-        if not prereq_results["all_passed"]:
-            # Offer to install missing prerequisites
-            if not handle_missing_prerequisites(prereq_results):
-                print(f"\n{Colors.RED}Please install missing prerequisites and run again.{Colors.RESET}")
-                return 1
-            # If we get here, prerequisites were installed successfully
-            print(f"\n{Colors.GREEN}Prerequisites installed successfully!{Colors.RESET}")
-            continue  # Re-check prerequisites
-        
-        print(f"  {Colors.GREEN}All prerequisites verified!{Colors.RESET}")
-        
+    
+    print(f"  {Colors.GREEN}All prerequisites verified!{Colors.RESET}")
+    
+    # Main menu loop
+    while True:
         # Show main menu
         choice = show_main_menu()
         
