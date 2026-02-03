@@ -262,6 +262,109 @@ def has_resources_to_destroy():
     return hub_spoke_status in ("completed", "failed", "in_progress") or byo_vnet_status in ("completed", "failed", "in_progress")
 
 
+def has_terraform_state_files():
+    """Check if any terraform state files exist."""
+    hub_state = HUB_SPOKE_PATH / "terraform.tfstate"
+    byo_state = BYO_VNET_PATH / "terraform.tfstate"
+    deployment_state = STATE_FILE
+    return hub_state.exists() or byo_state.exists() or deployment_state.exists()
+
+
+def run_reset():
+    """Delete all state files for a fresh start."""
+    print(f"\n{Colors.RED}=== Reset - Fresh Start ==={Colors.RESET}")
+    
+    # Check for existing Azure resource groups first
+    print(f"\n  {Colors.GRAY}Checking for existing Azure resource groups...{Colors.RESET}")
+    existing_rgs = []
+    try:
+        # Get subscription from state or prompt
+        state = load_state()
+        subscription_id = state.get("subscription_id") if state else None
+        
+        if subscription_id:
+            result = subprocess.run(
+                f'az group list --subscription "{subscription_id}" --query "[?starts_with(name, \'rg-aifoundry-\')].name" -o tsv',
+                capture_output=True, text=True, shell=True, timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                existing_rgs = [rg.strip() for rg in result.stdout.strip().split('\n') if rg.strip()]
+    except Exception:
+        pass
+    
+    if existing_rgs:
+        print(f"\n  {Colors.RED}WARNING: Found existing Azure resource groups:{Colors.RESET}")
+        for rg in existing_rgs:
+            print(f"    {Colors.RED}- {rg}{Colors.RESET}")
+        print(f"\n  {Colors.RED}These resources will cause deployment conflicts!{Colors.RESET}")
+        print(f"  {Colors.YELLOW}Please delete them in Azure Portal or run Destroy first.{Colors.RESET}")
+        
+        if not confirm("Continue with Reset anyway?", default=False):
+            print(f"\n{Colors.YELLOW}Reset cancelled. Delete Azure resources first.{Colors.RESET}")
+            input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+            return
+    
+    print(f"\n  {Colors.YELLOW}This will delete:{Colors.RESET}")
+    
+    files_to_delete = []
+    
+    # Check what exists
+    hub_state = HUB_SPOKE_PATH / "terraform.tfstate"
+    hub_backup = HUB_SPOKE_PATH / "terraform.tfstate.backup"
+    hub_lock = HUB_SPOKE_PATH / ".terraform.lock.hcl"
+    byo_state = BYO_VNET_PATH / "terraform.tfstate"
+    byo_backup = BYO_VNET_PATH / "terraform.tfstate.backup"
+    byo_lock = BYO_VNET_PATH / ".terraform.lock.hcl"
+    
+    if hub_state.exists():
+        files_to_delete.append(("Hub-Spoke terraform.tfstate", hub_state))
+    if hub_backup.exists():
+        files_to_delete.append(("Hub-Spoke terraform.tfstate.backup", hub_backup))
+    if hub_lock.exists():
+        files_to_delete.append(("Hub-Spoke .terraform.lock.hcl", hub_lock))
+    if byo_state.exists():
+        files_to_delete.append(("BYO VNet terraform.tfstate", byo_state))
+    if byo_backup.exists():
+        files_to_delete.append(("BYO VNet terraform.tfstate.backup", byo_backup))
+    if byo_lock.exists():
+        files_to_delete.append(("BYO VNet .terraform.lock.hcl", byo_lock))
+    if STATE_FILE.exists():
+        files_to_delete.append(("Deployment state (.deployment-state.json)", STATE_FILE))
+    
+    if not files_to_delete:
+        print(f"  {Colors.GRAY}No state files found.{Colors.RESET}")
+        input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+        return
+    
+    for name, _ in files_to_delete:
+        print(f"    - {name}")
+    
+    print(f"\n  {Colors.RED}WARNING: This will NOT delete Azure resources!{Colors.RESET}")
+    print(f"  {Colors.RED}If resources exist, delete them in Azure Portal first.{Colors.RESET}")
+    
+    if not confirm("Delete all state files?", default=False):
+        print(f"\n{Colors.YELLOW}Reset cancelled.{Colors.RESET}")
+        input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+        return
+    
+    # Delete files
+    deleted = []
+    for name, path in files_to_delete:
+        try:
+            path.unlink()
+            deleted.append(name)
+        except Exception as e:
+            print(f"  {Colors.RED}[FAIL] Could not delete {name}: {e}{Colors.RESET}")
+    
+    if deleted:
+        print(f"\n  {Colors.GREEN}[OK] Deleted:{Colors.RESET}")
+        for name in deleted:
+            print(f"    - {name}")
+    
+    print(f"\n{Colors.GREEN}Reset complete! You can now start a fresh deployment.{Colors.RESET}")
+    input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+
+
 # ============================================
 # DESTROY FUNCTIONS
 # ============================================
@@ -274,6 +377,19 @@ def run_terraform_destroy(working_dir, subscription_id, log_file):
     try:
         env = os.environ.copy()
         env["ARM_SUBSCRIPTION_ID"] = subscription_id
+        
+        # First run terraform init (needed if lock file was deleted)
+        print(f"  {Colors.GRAY}Initializing Terraform...{Colors.RESET}")
+        init_result = subprocess.run(
+            ["terraform", "init", "-no-color", "-input=false"],
+            capture_output=True, text=True, env=env, timeout=300
+        )
+        
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"terraform init (destroy): {init_result.stdout}\n{init_result.stderr}\n")
+        
+        if init_result.returncode != 0:
+            return False, f"Terraform init failed: {init_result.stderr}"
         
         print(f"  {Colors.GRAY}Running terraform destroy...{Colors.RESET}")
         result = subprocess.run(
@@ -336,7 +452,7 @@ def delete_resource_group(rg_name, subscription_id, log_file):
     return False, "Timeout waiting for resource group deletion"
 
 
-def purge_cognitive_services(account_name, location, subscription_id, log_file):
+def purge_cognitive_services(account_name, resource_group, location, subscription_id, log_file):
     """Purge a soft-deleted cognitive services account."""
     print(f"  {Colors.GRAY}Purging cognitive services account {account_name}...{Colors.RESET}")
     
@@ -365,25 +481,38 @@ def purge_cognitive_services(account_name, location, subscription_id, log_file):
     
     print(f"  {Colors.GRAY}Account found, purging...{Colors.RESET}")
     
-    # Purge the account
+    # Purge using az cognitiveservices account purge (requires original resource group name)
     result = subprocess.run(
-        f'az cognitiveservices account purge --name "{account_name}" --resource-group "" --location "{location}" --subscription "{subscription_id}"',
+        f'az cognitiveservices account purge --name "{account_name}" --resource-group "{resource_group}" --location "{location}" --subscription "{subscription_id}"',
         capture_output=True, text=True, shell=True
     )
     
     with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"az cognitiveservices purge: {result.stdout} {result.stderr}\n")
+        f.write(f"az cognitiveservices account purge: {result.stdout} {result.stderr}\n")
     
-    if result.returncode != 0:
-        # Try alternative approach - sometimes the RG is empty for deleted accounts
-        result = subprocess.run(
-            f'az resource delete --ids "/subscriptions/{subscription_id}/providers/Microsoft.CognitiveServices/locations/{location}/deletedAccounts/{account_name}" --debug',
+    # Check if purge succeeded
+    if result.returncode == 0:
+        # Wait a moment and verify
+        time.sleep(5)
+        verify_result = subprocess.run(
+            f'az cognitiveservices account list-deleted --subscription "{subscription_id}" --query "[?name==\'{account_name}\'].name" -o tsv',
             capture_output=True, text=True, shell=True
         )
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"az resource delete (purge): {result.stdout} {result.stderr}\n")
+        if account_name not in verify_result.stdout:
+            return True, "Account purged successfully"
+        else:
+            return True, "Purge command succeeded (account may take time to disappear)"
     
-    return result.returncode == 0, result.stdout + result.stderr
+    # Verify if account is actually gone (purge might have worked despite error)
+    verify_result = subprocess.run(
+        f'az cognitiveservices account list-deleted --subscription "{subscription_id}" --query "[?name==\'{account_name}\'].name" -o tsv',
+        capture_output=True, text=True, shell=True
+    )
+    
+    if account_name not in verify_result.stdout:
+        return True, "Account purged (verified)"
+    
+    return False, result.stderr
 
 
 def remove_terraform_state(working_dir, log_file):
@@ -585,13 +714,21 @@ def destroy_byo_vnet(state, log_file):
             print(f"  {Colors.GREEN}[OK] Resource group deleted{Colors.RESET}")
         else:
             print(f"  {Colors.RED}[FAIL] Resource group deletion failed: {rg_output}{Colors.RESET}")
+            
+            # Offer to clean up state files anyway (RG may be deleting in background)
+            if "Timeout" in rg_output and confirm("Delete terraform state files anyway? (Allows fresh start once RG is deleted)"):
+                removed = remove_terraform_state(BYO_VNET_PATH, log_file)
+                if removed:
+                    print(f"  {Colors.GREEN}[OK] Removed: {', '.join(removed)}{Colors.RESET}")
+                    print(f"  {Colors.YELLOW}Note: Wait for RG deletion to complete in Azure, then run Deploy.{Colors.RESET}")
             return False
     
     # Step 3: Purge cognitive services
     print(f"\n{Colors.YELLOW}[3/4] Purge Cognitive Services{Colors.RESET}")
     if byo_info["ai_foundry_name"]:
         purge_success, purge_output = purge_cognitive_services(
-            byo_info["ai_foundry_name"], 
+            byo_info["ai_foundry_name"],
+            byo_info["resource_group"],
             byo_info["location"], 
             subscription_id, 
             log_file
@@ -651,6 +788,13 @@ def destroy_hub_spoke(state, log_file):
                 print(f"  {Colors.GREEN}[OK] Resource group deleted{Colors.RESET}")
             else:
                 print(f"  {Colors.RED}[FAIL] Resource group deletion failed: {rg_output}{Colors.RESET}")
+                
+                # Offer to clean up state files anyway (RG may be deleting in background)
+                if "Timeout" in rg_output and confirm("Delete terraform state files anyway? (Allows fresh start once RG is deleted)"):
+                    removed = remove_terraform_state(HUB_SPOKE_PATH, log_file)
+                    if removed:
+                        print(f"  {Colors.GREEN}[OK] Removed: {', '.join(removed)}{Colors.RESET}")
+                        print(f"  {Colors.YELLOW}Note: Wait for RG deletion to complete in Azure, then run Deploy.{Colors.RESET}")
                 return False
         else:
             print(f"  {Colors.YELLOW}[WARN] Could not determine resource group name{Colors.RESET}")
@@ -829,6 +973,7 @@ def show_main_menu():
     state = load_state()
     has_deployment = has_previous_deployment()
     has_destroyable = has_resources_to_destroy()
+    has_state_files = has_terraform_state_files()
     
     print(f"\n{Colors.CYAN}=== Main Menu ==={Colors.RESET}")
     
@@ -842,6 +987,10 @@ def show_main_menu():
         print(f"    [2] Destroy - Remove deployed resources")
     else:
         print(f"    {Colors.GRAY}[2] Destroy - No resources to destroy{Colors.RESET}")
+    if has_state_files:
+        print(f"    [3] Reset - Delete all state files (fresh start)")
+    else:
+        print(f"    {Colors.GRAY}[3] Reset - No state files to delete{Colors.RESET}")
     print(f"    [0] Quit")
     
     while True:
@@ -854,14 +1003,28 @@ def show_main_menu():
                 return "destroy"
             else:
                 print(f"  {Colors.YELLOW}No resources to destroy.{Colors.RESET}")
-                print(f"\n  {Colors.YELLOW}Options:{Colors.RESET}")
-                print(f"    [1] Deploy - Start or resume deployment")
-                print(f"    {Colors.GRAY}[2] Destroy - No resources to destroy{Colors.RESET}")
-                print(f"    [0] Quit")
+        elif choice == "3":
+            if has_state_files:
+                return "reset"
+            else:
+                print(f"  {Colors.YELLOW}No state files to delete.{Colors.RESET}")
         elif choice == "0":
             return "quit"
         else:
             print(f"  {Colors.RED}Invalid option. Please try again.{Colors.RESET}")
+        
+        # Re-display menu after invalid/no-op choices
+        print(f"\n  {Colors.YELLOW}Options:{Colors.RESET}")
+        print(f"    [1] Deploy - Start or resume deployment")
+        if has_destroyable:
+            print(f"    [2] Destroy - Remove deployed resources")
+        else:
+            print(f"    {Colors.GRAY}[2] Destroy - No resources to destroy{Colors.RESET}")
+        if has_state_files:
+            print(f"    [3] Reset - Delete all state files (fresh start)")
+        else:
+            print(f"    {Colors.GRAY}[3] Reset - No state files to delete{Colors.RESET}")
+        print(f"    [0] Quit")
 
 
 # Prerequisites Check
@@ -1600,6 +1763,8 @@ def main():
             input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
         elif choice == "destroy":
             run_destroy()
+        elif choice == "reset":
+            run_reset()
         elif choice == "quit":
             print(f"\n{Colors.CYAN}Goodbye!{Colors.RESET}")
             return 0
