@@ -1461,7 +1461,9 @@ def run_deploy():
             subscription_id = prompt_input("Enter Azure Subscription ID", example="00000000-0000-0000-0000-000000000000")
         
         # Get location
-        location = prompt_input("Enter Azure Region", example="eastus, westus2, westeurope", default="eastus")
+        print(f"\n  {Colors.YELLOW}NOTE: Ensure you have sufficient quota in your chosen region.{Colors.RESET}")
+        print(f"  {Colors.YELLOW}      eastus2 often has limited quota for AI services.{Colors.RESET}")
+        location = prompt_input("Enter Azure Region", example="westus, westus3, westeurope", default="westus")
         
         # Deploy firewall?
         deploy_firewall = confirm("Deploy Azure Firewall? (~$900/month additional cost)", default=False)
@@ -1649,11 +1651,46 @@ def run_deploy():
                     raise Exception(f"Installer not found at: {installer}")
                 
                 print(f"  {Colors.GRAY}Launching installer (requires admin)...{Colors.RESET}")
-                # Run installer with elevation
-                subprocess.run(
-                    ["powershell", "-Command", f"Start-Process '{installer}' -Verb RunAs -Wait"],
-                    check=False
-                )
+                # Run installer with elevation and capture output
+                import tempfile
+                temp_log = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False, encoding='utf-8')
+                temp_log.close()
+                
+                # Create a wrapper script that runs the installer and captures any console output
+                temp_script = tempfile.NamedTemporaryFile(mode='w', suffix='.ps1', delete=False, encoding='utf-8')
+                temp_script.write(f'$ErrorActionPreference = "Continue"\n')
+                temp_script.write(f'try {{\n')
+                temp_script.write(f'    Start-Process -FilePath "{installer}" -Wait -PassThru | Out-Null\n')
+                temp_script.write(f'    "VPN_INSTALL_SUCCESS" | Out-File -FilePath "{temp_log.name}" -Encoding utf8\n')
+                temp_script.write(f'}} catch {{\n')
+                temp_script.write(f'    $_.Exception.Message | Out-File -FilePath "{temp_log.name}" -Encoding utf8\n')
+                temp_script.write(f'}}\n')
+                temp_script.close()
+                
+                try:
+                    result = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", 
+                         f'Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{temp_script.name}" -Wait'],
+                        capture_output=True, text=True
+                    )
+                    
+                    # Log any output from the outer process (profile errors, etc.)
+                    if result.stdout:
+                        logger.log(f"VPN installer stdout: {result.stdout}", "INFO")
+                    if result.stderr:
+                        logger.log(f"VPN installer stderr: {result.stderr}", "INFO")
+                    
+                    # Read result from temp log
+                    vpn_result = ""
+                    if os.path.exists(temp_log.name):
+                        with open(temp_log.name, 'r', encoding='utf-8', errors='replace') as f:
+                            vpn_result = f.read().strip()
+                        logger.log(f"VPN installer result: {vpn_result}", "INFO")
+                        os.unlink(temp_log.name)
+                    
+                finally:
+                    if os.path.exists(temp_script.name):
+                        os.unlink(temp_script.name)
                 
                 state = update_step(state, "vpn_client", "completed")
                 print_result(True, "VPN client installed")
