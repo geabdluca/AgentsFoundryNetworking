@@ -16,10 +16,13 @@ This project provides an automated launcher that deploys a complete, production-
 ### Prerequisites
 
 - **Windows 10/11** with PowerShell
-- **Python 3.8+** 
+- **Git** - `winget install Git.Git`
+- **Python 3.8+** - `winget install Python.Python.3.12`
 - **Terraform** - `winget install Hashicorp.Terraform`
 - **Azure CLI** - `winget install Microsoft.AzureCLI`
 - **Azure Subscription** with Owner/Contributor permissions
+
+> **Note:** After installing Git and Python via `winget`, you may need to restart your terminal (or open a new one) for the PATH changes to take effect.
 
 ```powershell
 # Login to Azure
@@ -36,6 +39,11 @@ python -m venv hublauncher_v0.1.0
 .\hublauncher_v0.1.0\Scripts\Activate.ps1
 python launcher.py
 ```
+
+> **Troubleshooting:** If you get an error stating *"running scripts is disabled on this system"* when activating the virtual environment, run the following command to update your execution policy:
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+> ```
 
 The launcher presents a menu-driven interface:
 

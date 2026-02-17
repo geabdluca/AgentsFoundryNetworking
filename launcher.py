@@ -723,6 +723,12 @@ def destroy_byo_vnet(state, log_file):
                     print(f"  {Colors.YELLOW}Note: Wait for RG deletion to complete in Azure, then run Deploy.{Colors.RESET}")
             return False
     
+    # Wait for resources to appear as soft-deleted before purge
+    print(f"\n{Colors.YELLOW}Waiting 60 seconds for resources to appear as soft-deleted...{Colors.RESET}")
+    for i in range(6):
+        time.sleep(10)
+        print(f"  {Colors.GRAY}{(i+1)*10}s...{Colors.RESET}")
+    
     # Step 3: Purge cognitive services
     print(f"\n{Colors.YELLOW}[3/4] Purge Cognitive Services{Colors.RESET}")
     if byo_info["ai_foundry_name"]:
@@ -945,8 +951,8 @@ def run_destroy():
             success = destroy_byo_vnet(state, log_file)
             if success:
                 # Wait before destroying hub-spoke to allow purge to complete
-                print(f"\n{Colors.YELLOW}Waiting 60 seconds before destroying Hub-Spoke...{Colors.RESET}")
-                for i in range(6):
+                print(f"\n{Colors.YELLOW}Waiting 120 seconds before destroying Hub-Spoke...{Colors.RESET}")
+                for i in range(12):
                     time.sleep(10)
                     print(f"  {Colors.GRAY}{(i+1)*10}s...{Colors.RESET}")
             else:
@@ -1041,6 +1047,21 @@ def compare_versions(version1, version2):
         elif v1 > v2:
             return 1
     return 0
+
+
+def _refresh_path():
+    """Refresh os.environ['PATH'] from the registry so newly installed tools are found."""
+    try:
+        import winreg
+        # Read Machine PATH
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment") as key:
+            machine_path, _ = winreg.QueryValueEx(key, "Path")
+        # Read User PATH
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+            user_path, _ = winreg.QueryValueEx(key, "Path")
+        os.environ["PATH"] = machine_path + ";" + user_path
+    except Exception:
+        pass  # Non-Windows or registry read failed; keep existing PATH
 
 
 def check_prerequisites():
@@ -1194,6 +1215,9 @@ def install_prerequisites(missing):
             else:
                 print(f"  {Colors.YELLOW}Try manually: winget install {item['winget_id']}{Colors.RESET}")
     
+    # Refresh PATH so newly installed tools are found without restarting
+    _refresh_path()
+
     # Check if Azure CLI login is needed
     print(f"\n{Colors.GRAY}Re-checking prerequisites...{Colors.RESET}")
 
@@ -1473,9 +1497,20 @@ def run_deploy():
         save_state(state)
         
         # Show summary
+        sub_display = subscription_id
+        try:
+            sub_result = subprocess.run(
+                f'az account show --subscription "{subscription_id}" --query "name" -o tsv',
+                capture_output=True, text=True, timeout=10, shell=True
+            )
+            if sub_result.returncode == 0 and sub_result.stdout.strip():
+                sub_display = f"{sub_result.stdout.strip()} ({subscription_id})"
+        except Exception:
+            pass
+
         print(f"\n  {Colors.GRAY}Deployment Configuration{Colors.RESET}")
         print(f"  {Colors.GRAY}------------------------{Colors.RESET}")
-        print(f"  {Colors.GRAY}Subscription: {subscription_id[:8]}...{Colors.RESET}")
+        print(f"  {Colors.GRAY}Subscription: {sub_display}{Colors.RESET}")
         print(f"  {Colors.GRAY}Location:     {location}{Colors.RESET}")
         print(f"  {Colors.GRAY}Firewall:     {'Yes' if deploy_firewall else 'No'}{Colors.RESET}")
         
@@ -1594,11 +1629,19 @@ def run_deploy():
     if state["steps"]["vpn_client"]["status"] not in ("completed", "skipped"):
         print_step(4, "Install VPN Client (Optional)")
         
-        if confirm("Download and install VPN client now?"):
+        print(f"\n  {Colors.CYAN}Select VPN client type:{Colors.RESET}")
+        print(f"    {Colors.YELLOW}[1]{Colors.RESET} Windows Native (IKEv2) - classic VPN client for x64/x86 systems")
+        print(f"    {Colors.YELLOW}[2]{Colors.RESET} PowerShell VPN Connection  - recommended for ARM64 or if option 1 fails")
+        print(f"    {Colors.YELLOW}[0]{Colors.RESET} Skip                    - install VPN client later manually")
+        
+        vpn_choice = input(f"\n  {Colors.YELLOW}-> Select option [0-2]: {Colors.RESET}").strip()
+        
+        if vpn_choice == "1":
+            # Windows Native VPN Client
             state = update_step(state, "vpn_client", "in_progress")
             
             try:
-                print(f"  {Colors.GRAY}Generating VPN client package...{Colors.RESET}")
+                print(f"\n  {Colors.GRAY}Generating VPN client package...{Colors.RESET}")
                 
                 rg_name = get_terraform_output(HUB_SPOKE_PATH, "resource_group_name")
                 vpn_gw_id = get_terraform_output(HUB_SPOKE_PATH, "vpn_gateway_id")
@@ -1643,7 +1686,6 @@ def run_deploy():
                 # Check for installer
                 installer = vpn_dir / "WindowsAmd64" / "VpnClientSetupAmd64.exe"
                 if not installer.exists():
-                    # Try alternate location
                     print(f"  {Colors.GRAY}Checking extracted contents...{Colors.RESET}")
                     for root, dirs, files in os.walk(vpn_dir):
                         for f in files:
@@ -1651,12 +1693,10 @@ def run_deploy():
                     raise Exception(f"Installer not found at: {installer}")
                 
                 print(f"  {Colors.GRAY}Launching installer (requires admin)...{Colors.RESET}")
-                # Run installer with elevation and capture output
                 import tempfile
                 temp_log = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False, encoding='utf-8')
                 temp_log.close()
                 
-                # Create a wrapper script that runs the installer and captures any console output
                 temp_script = tempfile.NamedTemporaryFile(mode='w', suffix='.ps1', delete=False, encoding='utf-8')
                 temp_script.write(f'$ErrorActionPreference = "Continue"\n')
                 temp_script.write(f'try {{\n')
@@ -1674,13 +1714,11 @@ def run_deploy():
                         capture_output=True, text=True
                     )
                     
-                    # Log any output from the outer process (profile errors, etc.)
                     if result.stdout:
                         logger.log(f"VPN installer stdout: {result.stdout}", "INFO")
                     if result.stderr:
                         logger.log(f"VPN installer stderr: {result.stderr}", "INFO")
                     
-                    # Read result from temp log
                     vpn_result = ""
                     if os.path.exists(temp_log.name):
                         with open(temp_log.name, 'r', encoding='utf-8', errors='replace') as f:
@@ -1693,17 +1731,179 @@ def run_deploy():
                         os.unlink(temp_script.name)
                 
                 state = update_step(state, "vpn_client", "completed")
-                print_result(True, "VPN client installed")
+                print_result(True, "Windows Native VPN client installed")
                 
             except Exception as e:
                 state = update_step(state, "vpn_client", "failed")
                 print_result(False, f"VPN client installation failed: {e}")
                 logger.log(f"VPN client error: {e}", "ERROR")
                 print(f"  {Colors.YELLOW}You can manually install later from: hub-spoke-network/VpnClient/WindowsAmd64/{Colors.RESET}")
+                print(f"  {Colors.YELLOW}If you get 'custom script' errors, try option [2] Azure VPN Client instead.{Colors.RESET}")
                 
                 if confirm("Retry VPN client installation?"):
                     state = update_step(state, "vpn_client", "pending")
                     return run_deploy()
+        
+        elif vpn_choice == "2":
+            # PowerShell VPN Connection (works on ARM64, no cmroute.dll needed)
+            state = update_step(state, "vpn_client", "in_progress")
+            
+            try:
+                print(f"\n  {Colors.GRAY}Reading VPN configuration...{Colors.RESET}")
+                
+                # Get VPN settings from terraform outputs or existing config
+                vpn_settings_file = SCRIPT_DIR / "hub-spoke-network" / "VpnClient" / "Generic" / "VpnSettings.xml"
+                
+                # If VpnClient config doesn't exist yet, download it
+                if not vpn_settings_file.exists():
+                    print(f"  {Colors.GRAY}Generating VPN client package...{Colors.RESET}")
+                    rg_name = get_terraform_output(HUB_SPOKE_PATH, "resource_group_name")
+                    vpn_gw_id = get_terraform_output(HUB_SPOKE_PATH, "vpn_gateway_id")
+                    vpn_gw_name = vpn_gw_id.split("/")[-1] if vpn_gw_id else None
+                    
+                    if not rg_name or not vpn_gw_name:
+                        raise Exception(f"Could not get terraform outputs (rg={rg_name}, vpn={vpn_gw_name})")
+                    
+                    gen_result = subprocess.run(
+                        ["az", "network", "vnet-gateway", "vpn-client", "generate",
+                         "--resource-group", rg_name, "--name", vpn_gw_name,
+                         "--processor-architecture", "Amd64", "--output", "tsv"],
+                        capture_output=True, text=True, shell=True
+                    )
+                    
+                    if gen_result.returncode == 0:
+                        url = gen_result.stdout.strip()
+                        if url and url.startswith("http"):
+                            vpn_zip = SCRIPT_DIR / "hub-spoke-network" / "VpnClient.zip"
+                            vpn_dir = SCRIPT_DIR / "hub-spoke-network" / "VpnClient"
+                            
+                            import urllib.request
+                            urllib.request.urlretrieve(url, vpn_zip)
+                            
+                            import zipfile
+                            with zipfile.ZipFile(vpn_zip, "r") as zip_ref:
+                                zip_ref.extractall(vpn_dir)
+                
+                if not vpn_settings_file.exists():
+                    raise Exception(f"VPN settings file not found: {vpn_settings_file}")
+                
+                # Parse VpnSettings.xml
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(vpn_settings_file)
+                root = tree.getroot()
+                ns = {"": root.tag.split("}")[0] + "}" if "}" in root.tag else ""}
+                
+                vpn_server = root.find("VpnServer", ns)
+                if vpn_server is None:
+                    vpn_server = root.find("{http://www.w3.org/2001/XMLSchema-instance}VpnServer")
+                if vpn_server is None:
+                    # Try without namespace
+                    for child in root:
+                        if child.tag.endswith("VpnServer"):
+                            vpn_server = child
+                            break
+                
+                server_address = vpn_server.text if vpn_server is not None else None
+                
+                routes_elem = root.find("Routes") 
+                if routes_elem is None:
+                    for child in root:
+                        if child.tag.endswith("Routes"):
+                            routes_elem = child
+                            break
+                
+                routes_text = routes_elem.text if routes_elem is not None else "10.0.0.0/16,10.1.0.0/16"
+                
+                vnet_name_elem = root.find("VnetName")
+                if vnet_name_elem is None:
+                    for child in root:
+                        if child.tag.endswith("VnetName"):
+                            vnet_name_elem = child
+                            break
+                
+                connection_name = vnet_name_elem.text if vnet_name_elem is not None else "Azure-AI-Foundry-VPN"
+                
+                if not server_address:
+                    raise Exception("Could not parse VPN server address from VpnSettings.xml")
+                
+                print(f"  {Colors.GRAY}  Server: {server_address}{Colors.RESET}")
+                print(f"  {Colors.GRAY}  Connection: {connection_name}{Colors.RESET}")
+                print(f"  {Colors.GRAY}  Routes: {routes_text}{Colors.RESET}")
+                
+                # Build route parameters for Add-VpnConnection
+                routes = [r.strip() for r in routes_text.split(",")]
+                route_cmds = "; ".join([
+                    f'Add-VpnConnectionRoute -ConnectionName "{connection_name}" -DestinationPrefix "{route}" -PassThru'
+                    for route in routes
+                ])
+                
+                # EAP-TLS XML config for certificate-based authentication
+                eap_tls_xml = (
+                    '<EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">'
+                    '<EapMethod>'
+                    '<Type xmlns="http://www.microsoft.com/provisioning/EapCommon">13</Type>'
+                    '<VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorId>'
+                    '<VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType>'
+                    '<AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</AuthorId>'
+                    '</EapMethod>'
+                    '<Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">'
+                    '<Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">'
+                    '<Type>13</Type>'
+                    '<EapType xmlns="http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV1">'
+                    '<CredentialsSource><CertificateStore><SimpleCertSelection>true</SimpleCertSelection></CertificateStore></CredentialsSource>'
+                    '<ServerValidation><DisableUserPromptForServerValidation>false</DisableUserPromptForServerValidation><ServerNames></ServerNames></ServerValidation>'
+                    '<DifferentUsername>false</DifferentUsername>'
+                    '<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV2">false</PerformServerValidation>'
+                    '<AcceptServerName xmlns="http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV2">false</AcceptServerName>'
+                    '</EapType></Eap></Config></EapHostConfig>'
+                )
+                
+                # Create VPN connection via PowerShell with EAP-TLS certificate auth
+                print(f"  {Colors.GRAY}Creating VPN connection...{Colors.RESET}")
+                ps_script = (
+                    f'Remove-VpnConnection -Name "{connection_name}" -Force -ErrorAction SilentlyContinue; '
+                    f'$eapXml = \'{eap_tls_xml}\'; '
+                    f'Add-VpnConnection -Name "{connection_name}" '
+                    f'-ServerAddress "{server_address}" '
+                    f'-TunnelType IKEv2 '
+                    f'-AuthenticationMethod Eap '
+                    f'-EapConfigXmlStream $eapXml '
+                    f'-SplitTunneling '
+                    f'-EncryptionLevel Required '
+                    f'-RememberCredential; '
+                    f'{route_cmds}; '
+                    f'Write-Host "VPN connection created successfully"'
+                )
+                
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    capture_output=True, text=True
+                )
+                
+                if result.returncode != 0:
+                    logger.log(f"VPN creation stderr: {result.stderr}", "ERROR")
+                    raise Exception(f"Failed to create VPN connection: {result.stderr}")
+                
+                logger.log(f"VPN creation output: {result.stdout}", "INFO")
+                
+                print(f"\n  {Colors.GREEN}VPN connection '{connection_name}' created successfully.{Colors.RESET}")
+                print(f"  {Colors.CYAN}To connect:{Colors.RESET}")
+                print(f"    {Colors.GRAY}1. Open Windows Settings > Network & Internet > VPN{Colors.RESET}")
+                print(f"    {Colors.GRAY}2. Click '{connection_name}' > Connect{Colors.RESET}")
+                print(f"    {Colors.GRAY}   Or run: rasdial \"{connection_name}\"{Colors.RESET}")
+                
+                state = update_step(state, "vpn_client", "completed")
+                print_result(True, "VPN connection created via PowerShell")
+                
+            except Exception as e:
+                state = update_step(state, "vpn_client", "failed")
+                print_result(False, f"VPN connection creation failed: {e}")
+                logger.log(f"PowerShell VPN error: {e}", "ERROR")
+                
+                if confirm("Retry VPN client installation?"):
+                    state = update_step(state, "vpn_client", "pending")
+                    return run_deploy()
+        
         else:
             state = update_step(state, "vpn_client", "skipped")
             print(f"  {Colors.YELLOW}VPN client skipped. Manual install instructions in README.{Colors.RESET}")
