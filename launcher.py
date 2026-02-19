@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -42,18 +43,48 @@ class Logger:
     
     def __init__(self):
         self.log_file = None
+        self.buffer = []  # Buffer for prereq logs
+        self.buffering = False  # Whether to buffer instead of write
     
     def initialize(self, operation="deploy"):
         LOG_DIR.mkdir(exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         self.log_file = LOG_DIR / f"{operation}-{timestamp}.log"
+        self.buffering = False
+        self.buffer = []
         self.log(f"=== {operation.title()} Started ===")
         return self.log_file
+    
+    def start_buffering(self, operation="prereq-check"):
+        """Start buffering logs instead of writing to file."""
+        self.buffering = True
+        self.buffer = []
+        LOG_DIR.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        self.log_file = LOG_DIR / f"{operation}-{timestamp}.log"
+        self.log(f"=== {operation.title()} Started ===")
+    
+    def flush_buffer(self):
+        """Write buffered logs to file (call when prereqs fail)."""
+        if self.buffer and self.log_file:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                for entry in self.buffer:
+                    f.write(entry + "\n")
+        self.buffer = []
+        self.buffering = False
+    
+    def discard_buffer(self):
+        """Discard buffered logs (call when prereqs pass)."""
+        self.buffer = []
+        self.buffering = False
+        self.log_file = None
     
     def log(self, message, level="INFO"):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"[{timestamp}] [{level}] {message}"
-        if self.log_file:
+        if self.buffering:
+            self.buffer.append(log_entry)
+        elif self.log_file:
             with open(self.log_file, "a", encoding="utf-8") as f:
                 f.write(log_entry + "\n")
     
@@ -575,12 +606,23 @@ def remove_vpn_client_files(log_file):
 
 def remove_vpn_connection_profile(log_file):
     """Remove VPN connection profile from Windows."""
+    logger.log("Removing VPN connection profiles...")
+    
     # Get VPN connection names that match our pattern
-    result = subprocess.run(
-        ['powershell', '-NoProfile', '-Command', 
-         'Get-VpnConnection | Where-Object { $_.Name -like "*hub*" -or $_.Name -like "*foundry*" -or $_.Name -like "*azure*" } | Select-Object -ExpandProperty Name'],
-        capture_output=True, text=True
-    )
+    try:
+        cmd = ['powershell', '-NoProfile', '-Command', 
+               'Get-VpnConnection | Where-Object { $_.Name -like "*hub*" -or $_.Name -like "*foundry*" -or $_.Name -like "*azure*" } | Select-Object -ExpandProperty Name']
+        logger.log(f"  Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        logger.log(f"  Exit code: {result.returncode}")
+    except FileNotFoundError as e:
+        logger.log(f"  ERROR: PowerShell not found - {e}", "ERROR")
+        print(f"  {Colors.YELLOW}Warning: Could not check VPN connections (PowerShell not found){Colors.RESET}")
+        return []
+    except Exception as e:
+        logger.log(f"  ERROR: {type(e).__name__} - {e}", "ERROR")
+        print(f"  {Colors.YELLOW}Warning: Could not check VPN connections ({e}){Colors.RESET}")
+        return []
     
     removed = []
     if result.returncode == 0 and result.stdout.strip():
@@ -588,13 +630,18 @@ def remove_vpn_connection_profile(log_file):
             vpn_name = vpn_name.strip()
             if vpn_name:
                 print(f"  {Colors.GRAY}Removing VPN connection: {vpn_name}{Colors.RESET}")
-                del_result = subprocess.run(
-                    ['powershell', '-NoProfile', '-Command',
-                     f'Remove-VpnConnection -Name "{vpn_name}" -Force -ErrorAction SilentlyContinue'],
-                    capture_output=True, text=True
-                )
-                if del_result.returncode == 0:
-                    removed.append(vpn_name)
+                logger.log(f"  Removing VPN connection: {vpn_name}")
+                try:
+                    del_result = subprocess.run(
+                        ['powershell', '-NoProfile', '-Command',
+                         f'Remove-VpnConnection -Name "{vpn_name}" -Force -ErrorAction SilentlyContinue'],
+                        capture_output=True, text=True
+                    )
+                    if del_result.returncode == 0:
+                        removed.append(vpn_name)
+                        logger.log(f"    Removed successfully")
+                except Exception as e:
+                    logger.log(f"    ERROR removing: {e}", "ERROR")
     
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(f"Removed VPN connections: {removed}\n")
@@ -1062,16 +1109,30 @@ def _refresh_path():
         os.environ["PATH"] = machine_path + ";" + user_path
     except Exception:
         pass  # Non-Windows or registry read failed; keep existing PATH
+    
+    # Also add common installation paths that might not be in registry yet
+    common_paths = [
+        os.path.expandvars(r"%ProgramFiles%\Microsoft SDKs\Azure\CLI2\wbin"),  # Azure CLI
+        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft SDKs\Azure\CLI2\wbin"),  # Azure CLI x86
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\bin"),  # VS Code
+    ]
+    current_path = os.environ.get("PATH", "")
+    for path in common_paths:
+        if os.path.isdir(path) and path not in current_path:
+            os.environ["PATH"] = path + ";" + current_path
+            current_path = os.environ["PATH"]
 
 
 def check_prerequisites():
     """Check if required tools are installed."""
     results = {"all_passed": True, "details": []}
+    logger.log("Starting prerequisite checks")
     
     # Check Terraform (with minimum version)
     tf_check = {"name": "Terraform", "installed": False, "version": None, "version_ok": False}
     try:
         result = subprocess.run(["terraform", "--version"], capture_output=True, text=True, timeout=10)
+        logger.log(f"Terraform check: returncode={result.returncode}, stdout={result.stdout[:200] if result.stdout else 'empty'}")
         if result.returncode == 0:
             match = re.search(r"Terraform v(\d+\.\d+\.\d+)", result.stdout)
             if match:
@@ -1080,9 +1141,10 @@ def check_prerequisites():
                 # Check minimum version
                 if compare_versions(tf_check["version"], MIN_TERRAFORM_VERSION) >= 0:
                     tf_check["version_ok"] = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.log(f"Terraform check exception: {e}", "ERROR")
     results["details"].append(tf_check)
+    logger.log(f"Terraform: installed={tf_check['installed']}, version={tf_check['version']}, version_ok={tf_check.get('version_ok')}")
     if not tf_check["installed"] or not tf_check["version_ok"]:
         results["all_passed"] = False
     
@@ -1090,14 +1152,16 @@ def check_prerequisites():
     az_check = {"name": "Azure CLI", "installed": False, "version": None}
     try:
         result = subprocess.run("az --version", capture_output=True, text=True, timeout=10, shell=True)
+        logger.log(f"Azure CLI check: returncode={result.returncode}, stderr={result.stderr[:200] if result.stderr else 'empty'}")
         if result.returncode == 0:
             match = re.search(r"azure-cli\s+(\d+\.\d+\.\d+)", result.stdout)
             if match:
                 az_check["installed"] = True
                 az_check["version"] = match.group(1)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.log(f"Azure CLI check exception: {e}", "ERROR")
     results["details"].append(az_check)
+    logger.log(f"Azure CLI: installed={az_check['installed']}, version={az_check['version']}")
     if not az_check["installed"]:
         results["all_passed"] = False
     
@@ -1105,13 +1169,15 @@ def check_prerequisites():
     login_check = {"name": "Azure CLI Login", "installed": False, "version": None}
     try:
         result = subprocess.run("az account show", capture_output=True, text=True, timeout=10, shell=True)
+        logger.log(f"Azure CLI login check: returncode={result.returncode}, stderr={result.stderr[:200] if result.stderr else 'empty'}")
         if result.returncode == 0:
             account = json.loads(result.stdout)
             login_check["installed"] = True
             login_check["version"] = f"Logged in as: {account.get('user', {}).get('name', 'unknown')}"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.log(f"Azure CLI login check exception: {e}", "ERROR")
     results["details"].append(login_check)
+    logger.log(f"Azure CLI Login: logged_in={login_check['installed']}, user={login_check['version']}")
     if not login_check["installed"]:
         results["all_passed"] = False
     
@@ -1119,17 +1185,20 @@ def check_prerequisites():
     openssl_check = {"name": "OpenSSL", "installed": False, "version": None}
     try:
         result = subprocess.run(["openssl", "version"], capture_output=True, text=True, timeout=10)
+        logger.log(f"OpenSSL check: returncode={result.returncode}, stdout={result.stdout[:200] if result.stdout else 'empty'}")
         if result.returncode == 0:
             match = re.search(r"OpenSSL\s+([\d\.]+)", result.stdout)
             if match:
                 openssl_check["installed"] = True
                 openssl_check["version"] = match.group(1)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.log(f"OpenSSL check exception: {e}", "ERROR")
     results["details"].append(openssl_check)
+    logger.log(f"OpenSSL: installed={openssl_check['installed']}, version={openssl_check['version']}")
     if not openssl_check["installed"]:
         results["all_passed"] = False
     
+    logger.log(f"Prerequisite check complete: all_passed={results['all_passed']}")
     return results
 
 
@@ -1400,6 +1469,12 @@ def run_powershell_script(script_path, elevated=False, working_dir=None):
     if working_dir is None:
         working_dir = script_path.parent
     
+    # Log execution details for debugging
+    logger.log(f"Running PowerShell script: {script_path}")
+    logger.log(f"  Working directory: {working_dir}")
+    logger.log(f"  Elevated: {elevated}")
+    logger.log(f"  Script exists: {script_path.exists()}")
+    
     if elevated:
         # Run with elevation using a temp script to avoid quoting issues with paths containing spaces
         import tempfile
@@ -1446,8 +1521,18 @@ def run_powershell_script(script_path, elevated=False, working_dir=None):
                 os.unlink(temp_script.name)
     else:
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(working_dir))
-        return result.returncode == 0, result.stdout + result.stderr
+        logger.log(f"  Command: {' '.join(cmd)}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(working_dir))
+            logger.log(f"  Exit code: {result.returncode}")
+            return result.returncode == 0, result.stdout + result.stderr
+        except FileNotFoundError as e:
+            logger.log(f"  ERROR: FileNotFoundError - {e}", "ERROR")
+            logger.log(f"  This usually means 'powershell' is not in PATH or the script file doesn't exist", "ERROR")
+            raise
+        except Exception as e:
+            logger.log(f"  ERROR: {type(e).__name__} - {e}", "ERROR")
+            raise
 
 
 def run_deploy():
@@ -1968,12 +2053,24 @@ def main():
     """Main entry point with menu."""
     print_banner()
     
+    # Start buffered logging for prerequisite checks (only written to file if checks fail)
+    logger.start_buffering("prereq-check")
+    logger.log(f"Current PATH: {os.environ.get('PATH', 'NOT SET')[:500]}...")  # Log first 500 chars of PATH
+    
+    # Refresh PATH from registry to pick up tools installed in previous sessions
+    _refresh_path()
+    logger.log("PATH refreshed from registry")
+    
     # Check prerequisites once at startup
     print(f"\n{Colors.CYAN}Checking prerequisites...{Colors.RESET}")
     prereq_results = check_prerequisites()
     show_prerequisites(prereq_results)
     
     while not prereq_results["all_passed"]:
+        # Flush buffered logs to file since prereqs failed
+        logger.flush_buffer()
+        print(f"  {Colors.GRAY}(Prereq check log: {logger.log_file}){Colors.RESET}")
+        
         # Offer to install missing prerequisites
         if not handle_missing_prerequisites(prereq_results):
             print(f"\n{Colors.RED}Please install missing prerequisites and run again.{Colors.RESET}")
@@ -1985,6 +2082,8 @@ def main():
         prereq_results = check_prerequisites()
         show_prerequisites(prereq_results)
     
+    # All prerequisites passed - discard the buffer (no need to write log file)
+    logger.discard_buffer()
     print(f"  {Colors.GREEN}All prerequisites verified!{Colors.RESET}")
     
     # Main menu loop
@@ -2014,7 +2113,12 @@ if __name__ == "__main__":
         print(f"\n\n{Colors.YELLOW}Operation cancelled by user.{Colors.RESET}")
         sys.exit(1)
     except Exception as e:
+        # Get full traceback for debugging
+        tb_str = traceback.format_exc()
         print(f"\n{Colors.RED}FATAL ERROR: {e}{Colors.RESET}")
+        print(f"{Colors.GRAY}Traceback:{Colors.RESET}")
+        print(f"{Colors.GRAY}{tb_str}{Colors.RESET}")
         logger.log(f"Fatal error: {e}", "ERROR")
+        logger.log(f"Traceback:\n{tb_str}", "ERROR")
         logger.show_tail(30)
         sys.exit(1)
