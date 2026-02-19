@@ -26,6 +26,9 @@ VPN_CLIENT_PATH = SCRIPT_DIR / "VpnClient"
 TOTAL_STEPS = 5
 MIN_TERRAFORM_VERSION = "1.10.0"
 
+# Resolve PowerShell path to avoid PATH resolution issues
+POWERSHELL_PATH = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
 
 class Colors:
     """ANSI color codes for terminal output."""
@@ -610,7 +613,7 @@ def remove_vpn_connection_profile(log_file):
     
     # Get VPN connection names that match our pattern
     try:
-        cmd = ['powershell', '-NoProfile', '-Command', 
+        cmd = [POWERSHELL_PATH, '-NoProfile', '-Command', 
                'Get-VpnConnection | Where-Object { $_.Name -like "*hub*" -or $_.Name -like "*foundry*" -or $_.Name -like "*azure*" } | Select-Object -ExpandProperty Name']
         logger.log(f"  Running: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -633,7 +636,7 @@ def remove_vpn_connection_profile(log_file):
                 logger.log(f"  Removing VPN connection: {vpn_name}")
                 try:
                     del_result = subprocess.run(
-                        ['powershell', '-NoProfile', '-Command',
+                        [POWERSHELL_PATH, '-NoProfile', '-Command',
                          f'Remove-VpnConnection -Name "{vpn_name}" -Force -ErrorAction SilentlyContinue'],
                         capture_output=True, text=True
                     )
@@ -1461,8 +1464,15 @@ def get_terraform_output(working_dir, output_name):
         os.chdir(original_dir)
 
 
-def run_powershell_script(script_path, elevated=False, working_dir=None):
-    """Run a PowerShell script from a specific directory."""
+def run_powershell_script(script_path, elevated=False, working_dir=None, script_args=None):
+    """Run a PowerShell script from a specific directory.
+    
+    Args:
+        script_path: Path to the PowerShell script
+        elevated: Whether to run with admin elevation
+        working_dir: Working directory for the script
+        script_args: Optional string of arguments to pass to the script
+    """
     script_path = Path(script_path).resolve()
     
     # Default working directory is the script's parent folder
@@ -1474,6 +1484,8 @@ def run_powershell_script(script_path, elevated=False, working_dir=None):
     logger.log(f"  Working directory: {working_dir}")
     logger.log(f"  Elevated: {elevated}")
     logger.log(f"  Script exists: {script_path.exists()}")
+    if script_args:
+        logger.log(f"  Script args: {script_args}")
     
     if elevated:
         # Run with elevation using a temp script to avoid quoting issues with paths containing spaces
@@ -1495,7 +1507,7 @@ def run_powershell_script(script_path, elevated=False, working_dir=None):
         
         try:
             cmd = [
-                "powershell", "-Command",
+                POWERSHELL_PATH, "-Command",
                 f'Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{temp_script.name}" -Wait'
             ]
             subprocess.run(cmd, capture_output=True, text=True)
@@ -1520,10 +1532,12 @@ def run_powershell_script(script_path, elevated=False, working_dir=None):
             if os.path.exists(temp_script.name):
                 os.unlink(temp_script.name)
     else:
-        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)]
-        logger.log(f"  Command: {' '.join(cmd)}")
+        # Use full path to PowerShell with shell=True to properly inherit PATH
+        args_str = f" {script_args}" if script_args else ""
+        shell_cmd = f'"{POWERSHELL_PATH}" -ExecutionPolicy Bypass -File "{script_path}"{args_str}'
+        logger.log(f"  Command: {shell_cmd}")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(working_dir))
+            result = subprocess.run(shell_cmd, capture_output=True, text=True, cwd=str(working_dir), shell=True)
             logger.log(f"  Exit code: {result.returncode}")
             return result.returncode == 0, result.stdout + result.stderr
         except FileNotFoundError as e:
@@ -1663,8 +1677,15 @@ def run_deploy():
         state = update_step(state, "dns_install", "in_progress")
         dns_script = SCRIPT_DIR / "hub-spoke-network" / "install-dns-server.ps1"
         
+        # Get values from terraform state to pass as parameters (avoids PATH issues with terraform command)
+        rg_name = get_terraform_output(HUB_SPOKE_PATH, "resource_group_name")
+        vm_name = get_terraform_output(HUB_SPOKE_PATH, "dns_vm_name")
+        
         print(f"  {Colors.GRAY}Installing DNS role and configuring forwarders...{Colors.RESET}")
-        success, output = run_powershell_script(dns_script)
+        
+        # Pass parameters directly to avoid terraform PATH issues in subprocess
+        script_args = f'-ResourceGroupName "{rg_name}" -VMName "{vm_name}"' if rg_name and vm_name else None
+        success, output = run_powershell_script(dns_script, script_args=script_args)
         
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(output)
@@ -1794,7 +1815,7 @@ def run_deploy():
                 
                 try:
                     result = subprocess.run(
-                        ["powershell", "-NoProfile", "-Command", 
+                        [POWERSHELL_PATH, "-NoProfile", "-Command", 
                          f'Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{temp_script.name}" -Wait'],
                         capture_output=True, text=True
                     )
@@ -1961,7 +1982,7 @@ def run_deploy():
                 )
                 
                 result = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    [POWERSHELL_PATH, "-NoProfile", "-Command", ps_script],
                     capture_output=True, text=True
                 )
                 
