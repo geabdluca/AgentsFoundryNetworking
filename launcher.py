@@ -1113,17 +1113,36 @@ def _refresh_path():
     except Exception:
         pass  # Non-Windows or registry read failed; keep existing PATH
     
+    # Ensure critical Windows system paths are included (required for cmd.exe, used by Azure SDK)
+    critical_paths = [
+        r"C:\Windows\System32",
+        r"C:\Windows",
+    ]
+    
     # Also add common installation paths that might not be in registry yet
     common_paths = [
         os.path.expandvars(r"%ProgramFiles%\Microsoft SDKs\Azure\CLI2\wbin"),  # Azure CLI
         os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft SDKs\Azure\CLI2\wbin"),  # Azure CLI x86
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\bin"),  # VS Code
     ]
+    
     current_path = os.environ.get("PATH", "")
+    
+    # Add critical paths first (prepend to ensure they're found)
+    for path in critical_paths:
+        if os.path.isdir(path) and path.lower() not in current_path.lower():
+            os.environ["PATH"] = path + ";" + current_path
+            current_path = os.environ["PATH"]
+    
+    # Add common paths
     for path in common_paths:
         if os.path.isdir(path) and path not in current_path:
             os.environ["PATH"] = path + ";" + current_path
             current_path = os.environ["PATH"]
+    
+    # Ensure COMSPEC is set (required by Azure SDK's ChainedTokenCredential)
+    if "COMSPEC" not in os.environ:
+        os.environ["COMSPEC"] = r"C:\Windows\System32\cmd.exe"
 
 
 def check_prerequisites():
