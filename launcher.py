@@ -26,6 +26,17 @@ VPN_CLIENT_PATH = SCRIPT_DIR / "VpnClient"
 TOTAL_STEPS = 5
 MIN_TERRAFORM_VERSION = "1.10.0"
 
+# Required Azure Resource Providers for AI Foundry with Standard Agents (VNet injection)
+REQUIRED_RESOURCE_PROVIDERS = [
+    "Microsoft.KeyVault",
+    "Microsoft.CognitiveServices",
+    "Microsoft.Storage",
+    "Microsoft.Search",
+    "Microsoft.Network",
+    "Microsoft.App",
+    "Microsoft.ContainerService",
+]
+
 # Resolve PowerShell path to avoid PATH resolution issues
 POWERSHELL_PATH = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
@@ -247,6 +258,7 @@ def create_state(subscription_id, location, deploy_firewall):
         "location": location,
         "deploy_firewall": deploy_firewall,
         "created_at": datetime.now().isoformat(),
+        "rp_registered": False,  # Track if resource providers have been verified/registered
         "resources": {
             "hub_spoke_rg": None,
             "vpn_gateway_name": None,
@@ -411,6 +423,18 @@ def run_terraform_destroy(working_dir, subscription_id, log_file):
     try:
         env = os.environ.copy()
         env["ARM_SUBSCRIPTION_ID"] = subscription_id
+        
+        # Ensure critical Windows system paths are present (required for Azure CLI credential chain)
+        system_root = os.environ.get("SystemRoot", r"C:\WINDOWS")
+        critical_paths = [
+            os.path.join(system_root, "system32"),
+            system_root,
+        ]
+        current_path = env.get("PATH", "")
+        for critical_path in critical_paths:
+            if critical_path.lower() not in current_path.lower():
+                current_path = critical_path + ";" + current_path
+        env["PATH"] = current_path
         
         # First run terraform init (needed if lock file was deleted)
         print(f"  {Colors.GRAY}Initializing Terraform...{Colors.RESET}")
@@ -610,41 +634,70 @@ def remove_vpn_client_files(log_file):
 def remove_vpn_connection_profile(log_file):
     """Remove VPN connection profile from Windows."""
     logger.log("Removing VPN connection profiles...")
+    removed = []
     
-    # Get VPN connection names that match our pattern
+    # Method 1: Use Get-VpnConnection for standard VPN connections
+    # ONLY match connections created by this launcher:
+    # - vnet-hub-* (PowerShell VPN option uses VNet name from VpnSettings.xml)
+    # - Azure-AI-Foundry-VPN (fallback name if VnetName is missing)
     try:
         cmd = [POWERSHELL_PATH, '-NoProfile', '-Command', 
-               'Get-VpnConnection | Where-Object { $_.Name -like "*hub*" -or $_.Name -like "*foundry*" -or $_.Name -like "*azure*" } | Select-Object -ExpandProperty Name']
+               'Get-VpnConnection | Where-Object { $_.Name -like "vnet-hub-*" -or $_.Name -eq "Azure-AI-Foundry-VPN" } | Select-Object -ExpandProperty Name']
         logger.log(f"  Running: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         logger.log(f"  Exit code: {result.returncode}")
+        
+        if result.returncode == 0 and result.stdout.strip():
+            for vpn_name in result.stdout.strip().split('\n'):
+                vpn_name = vpn_name.strip()
+                if vpn_name:
+                    print(f"  {Colors.GRAY}Removing VPN connection: {vpn_name}{Colors.RESET}")
+                    logger.log(f"  Removing VPN connection: {vpn_name}")
+                    try:
+                        del_result = subprocess.run(
+                            [POWERSHELL_PATH, '-NoProfile', '-Command',
+                             f'Remove-VpnConnection -Name "{vpn_name}" -Force -ErrorAction SilentlyContinue'],
+                            capture_output=True, text=True
+                        )
+                        if del_result.returncode == 0:
+                            removed.append(vpn_name)
+                            logger.log(f"    Removed successfully")
+                    except Exception as e:
+                        logger.log(f"    ERROR removing: {e}", "ERROR")
     except FileNotFoundError as e:
         logger.log(f"  ERROR: PowerShell not found - {e}", "ERROR")
-        print(f"  {Colors.YELLOW}Warning: Could not check VPN connections (PowerShell not found){Colors.RESET}")
-        return []
     except Exception as e:
         logger.log(f"  ERROR: {type(e).__name__} - {e}", "ERROR")
-        print(f"  {Colors.YELLOW}Warning: Could not check VPN connections ({e}){Colors.RESET}")
-        return []
     
-    removed = []
-    if result.returncode == 0 and result.stdout.strip():
-        for vpn_name in result.stdout.strip().split('\n'):
-            vpn_name = vpn_name.strip()
-            if vpn_name:
-                print(f"  {Colors.GRAY}Removing VPN connection: {vpn_name}{Colors.RESET}")
-                logger.log(f"  Removing VPN connection: {vpn_name}")
+    # Method 2: Also check phonebook files for vnet-hub-* entries that Get-VpnConnection might miss
+    # Use rasphone -r to remove these entries
+    try:
+        pbk_path = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Network" / "Connections" / "Pbk"
+        if pbk_path.exists():
+            for pbk_file in pbk_path.rglob("*.pbk"):
                 try:
-                    del_result = subprocess.run(
-                        [POWERSHELL_PATH, '-NoProfile', '-Command',
-                         f'Remove-VpnConnection -Name "{vpn_name}" -Force -ErrorAction SilentlyContinue'],
-                        capture_output=True, text=True
-                    )
-                    if del_result.returncode == 0:
-                        removed.append(vpn_name)
-                        logger.log(f"    Removed successfully")
+                    content = pbk_file.read_text(encoding='utf-8', errors='ignore')
+                    # Find vnet-hub-* entries in phonebook
+                    import re
+                    for match in re.finditer(r'^\[(vnet-hub-[^\]]+)\]', content, re.MULTILINE):
+                        vpn_name = match.group(1)
+                        if vpn_name not in removed:
+                            print(f"  {Colors.GRAY}Removing VPN connection (phonebook): {vpn_name}{Colors.RESET}")
+                            logger.log(f"  Removing VPN connection via rasphone: {vpn_name}")
+                            try:
+                                del_result = subprocess.run(
+                                    ["rasphone", "-r", vpn_name],
+                                    capture_output=True, text=True
+                                )
+                                if del_result.returncode == 0:
+                                    removed.append(vpn_name)
+                                    logger.log(f"    Removed successfully via rasphone")
+                            except Exception as e:
+                                logger.log(f"    ERROR removing via rasphone: {e}", "ERROR")
                 except Exception as e:
-                    logger.log(f"    ERROR removing: {e}", "ERROR")
+                    logger.log(f"  ERROR reading phonebook {pbk_file}: {e}", "ERROR")
+    except Exception as e:
+        logger.log(f"  ERROR checking phonebook: {e}", "ERROR")
     
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(f"Removed VPN connections: {removed}\n")
@@ -1283,7 +1336,8 @@ def install_prerequisites(missing):
             print(f"  {Colors.GRAY}Running: winget upgrade {item['winget_id']}{Colors.RESET}")
             
             result = subprocess.run(
-                ["winget", "upgrade", "--id", item["winget_id"], "--accept-source-agreements", "--accept-package-agreements"],
+                f"winget upgrade --id {item['winget_id']} --accept-source-agreements --accept-package-agreements",
+                shell=True,
                 capture_output=False,
                 text=True
             )
@@ -1292,7 +1346,8 @@ def install_prerequisites(missing):
             print(f"  {Colors.GRAY}Running: winget install {item['winget_id']}{Colors.RESET}")
             
             result = subprocess.run(
-                ["winget", "install", "--id", item["winget_id"], "--accept-source-agreements", "--accept-package-agreements"],
+                f"winget install --id {item['winget_id']} --accept-source-agreements --accept-package-agreements",
+                shell=True,
                 capture_output=False,
                 text=True
             )
@@ -1325,6 +1380,124 @@ def run_azure_login():
     )
     
     return result.returncode == 0
+
+
+def check_and_register_resource_providers(state):
+    """Check and register required Azure Resource Providers for AI Foundry deployment.
+    
+    Args:
+        state: Deployment state dict (will be updated if providers are registered)
+    
+    Returns:
+        bool: True if all providers are registered, False if registration failed or was declined.
+    """
+    # Check if already verified for this subscription
+    if state.get("rp_registered"):
+        print(f"\n  {Colors.GREEN}Resource providers already verified for this subscription.{Colors.RESET}")
+        logger.log("Resource providers already verified (cached)")
+        return True
+    
+    subscription_id = state["subscription_id"]
+    print(f"\n  {Colors.CYAN}Checking Azure Resource Providers...{Colors.RESET}")
+    logger.log(f"Checking resource providers for subscription {subscription_id}")
+    
+    # Check which providers need registration
+    missing_providers = []
+    for provider in REQUIRED_RESOURCE_PROVIDERS:
+        try:
+            result = subprocess.run(
+                f'az provider show --namespace {provider} --query "registrationState" -o tsv',
+                capture_output=True, text=True, timeout=30, shell=True
+            )
+            status = result.stdout.strip().lower()
+            logger.log(f"RP check {provider}: status={status}")
+            
+            if result.returncode != 0 or status != "registered":
+                missing_providers.append(provider)
+                print(f"    {Colors.YELLOW}[MISSING] {provider}{Colors.RESET}")
+            else:
+                print(f"    {Colors.GREEN}[OK] {provider}{Colors.RESET}")
+        except Exception as e:
+            logger.log(f"RP check {provider} exception: {e}", "ERROR")
+            missing_providers.append(provider)
+            print(f"    {Colors.YELLOW}[UNKNOWN] {provider}{Colors.RESET}")
+    
+    if not missing_providers:
+        print(f"  {Colors.GREEN}All required resource providers are registered.{Colors.RESET}")
+        logger.log("All resource providers already registered")
+        # Cache the result in state
+        state["rp_registered"] = True
+        save_state(state)
+        return True
+    
+    # Offer to register missing providers
+    print(f"\n  {Colors.YELLOW}The following resource providers need to be registered:{Colors.RESET}")
+    for provider in missing_providers:
+        print(f"    - {provider}")
+    print(f"  {Colors.GRAY}These are required for AI Foundry with Standard Agents.{Colors.RESET}")
+    
+    if not confirm("\n  Register these resource providers now?"):
+        print(f"\n  {Colors.YELLOW}Manual commands:{Colors.RESET}")
+        for provider in missing_providers:
+            print(f"  {Colors.GRAY}az provider register --namespace {provider}{Colors.RESET}")
+        return False
+    
+    # Register missing providers
+    print(f"\n  {Colors.CYAN}Registering resource providers...{Colors.RESET}")
+    print(f"  {Colors.GRAY}(This may take a few minutes){Colors.RESET}")
+    
+    for provider in missing_providers:
+        logger.log(f"Registering resource provider: {provider}")
+        result = subprocess.run(
+            f"az provider register --namespace {provider}",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"    {Colors.GREEN}[OK] {provider} registration initiated{Colors.RESET}")
+            logger.log(f"Resource provider {provider} registration initiated")
+        else:
+            print(f"    {Colors.RED}[FAIL] {provider} registration failed: {result.stderr}{Colors.RESET}")
+            logger.log(f"Resource provider {provider} registration failed: {result.stderr}", "ERROR")
+    
+    # Wait for registrations to complete
+    print(f"\n  {Colors.GRAY}Waiting for registrations to complete...{Colors.RESET}")
+    max_wait = 180  # 3 minutes max
+    wait_interval = 15
+    elapsed = 0
+    
+    while elapsed < max_wait:
+        all_registered = True
+        pending = []
+        for provider in missing_providers:
+            result = subprocess.run(
+                f'az provider show --namespace {provider} --query "registrationState" -o tsv',
+                capture_output=True, text=True, timeout=30, shell=True
+            )
+            if result.stdout.strip().lower() != "registered":
+                all_registered = False
+                pending.append(provider)
+        
+        if all_registered:
+            print(f"  {Colors.GREEN}All resource providers registered successfully!{Colors.RESET}")
+            logger.log("All resource providers registered successfully")
+            # Cache the result in state
+            state["rp_registered"] = True
+            save_state(state)
+            return True
+        
+        time.sleep(wait_interval)
+        elapsed += wait_interval
+        print(f"  {Colors.GRAY}Still waiting for: {', '.join(pending)} ({elapsed}s){Colors.RESET}")
+    
+    print(f"  {Colors.YELLOW}Registration taking longer than expected. Proceeding anyway - Terraform will wait if needed.{Colors.RESET}")
+    logger.log("Resource provider registration timeout - proceeding anyway", "WARNING")
+    # Still cache as registered since we're proceeding - Terraform will handle any remaining wait
+    state["rp_registered"] = True
+    save_state(state)
+    return True  # Return True to allow deployment to proceed - Terraform has its own wait logic
 
 
 def handle_missing_prerequisites(results):
@@ -1411,6 +1584,18 @@ def run_terraform(working_dir, subscription_id, variables, log_file, max_retries
         env = os.environ.copy()
         env["ARM_SUBSCRIPTION_ID"] = subscription_id
         
+        # Ensure critical Windows system paths are present (required for Azure CLI credential chain)
+        system_root = os.environ.get("SystemRoot", r"C:\WINDOWS")
+        critical_paths = [
+            os.path.join(system_root, "system32"),
+            system_root,
+        ]
+        current_path = env.get("PATH", "")
+        for critical_path in critical_paths:
+            if critical_path.lower() not in current_path.lower():
+                current_path = critical_path + ";" + current_path
+        env["PATH"] = current_path
+        
         # Create tfvars content
         tfvars_lines = [f'subscription_id = "{subscription_id}"']
         for key, value in variables.items():
@@ -1464,21 +1649,6 @@ def run_terraform(working_dir, subscription_id, variables, log_file, max_retries
         
         return {"success": False, "error": f"Terraform apply failed after {max_retries} attempts", "output": result.stderr}
     
-    finally:
-        os.chdir(original_dir)
-
-
-def get_terraform_output(working_dir, output_name):
-    """Get a terraform output value."""
-    original_dir = os.getcwd()
-    os.chdir(working_dir)
-    
-    try:
-        result = subprocess.run(
-            ["terraform", "output", "-raw", output_name],
-            capture_output=True, text=True
-        )
-        return result.stdout.strip() if result.returncode == 0 else None
     finally:
         os.chdir(original_dir)
 
@@ -2041,6 +2211,17 @@ def run_deploy():
     
     if state["steps"]["byo_vnet"]["status"] != "completed":
         if confirm("Deploy BYO VNet AI Foundry resources? (20-30 min)"):
+            # Check and register required resource providers before deployment
+            if not check_and_register_resource_providers(state):
+                print(f"  {Colors.RED}Resource provider registration is required for AI Foundry deployment.{Colors.RESET}")
+                if confirm("Skip deployment for now?"):
+                    state = update_step(state, "byo_vnet", "skipped")
+                    print(f"  {Colors.YELLOW}AI Foundry deployment skipped.{Colors.RESET}")
+                    print_completion(log_file, state)
+                    return 0
+                # User wants to retry
+                return run_deploy()
+            
             state = update_step(state, "byo_vnet", "in_progress")
             
             tf_vars = {
