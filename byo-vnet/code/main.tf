@@ -550,6 +550,23 @@ resource "azurerm_role_assignment" "search_service_contributor_ai_foundry_projec
   principal_id         = azapi_resource.ai_foundry_project.output.identity.principalId
 }
 
+## Grant the project MI the Cosmos DB Built-in Data Contributor SQL role at the account level
+## Required for AI Foundry Standard Agent to read/write agent data in Cosmos DB
+## Note: Scoped at account level because the role must exist before the capability host
+## creates the enterprise_memory database. A scoped assignment is added post-creation below.
+##
+resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_sql_data_contributor_ai_foundry_project" {
+  depends_on = [
+    resource.time_sleep.wait_project_identities
+  ]
+  name                = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}${azurerm_cosmosdb_account.cosmosdb.name}cosmosdbsqldatacontributor")
+  resource_group_name = azurerm_resource_group.foundry.name
+  account_name        = azurerm_cosmosdb_account.cosmosdb.name
+  scope               = azurerm_cosmosdb_account.cosmosdb.id
+  role_definition_id  = "${azurerm_cosmosdb_account.cosmosdb.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
+  principal_id        = azapi_resource.ai_foundry_project.output.identity.principalId
+}
+
 ## Pause 60 seconds to allow for role assignments to propagate
 ##
 resource "time_sleep" "wait_rbac" {
@@ -557,9 +574,10 @@ resource "time_sleep" "wait_rbac" {
     azurerm_role_assignment.cosmosdb_operator_ai_foundry_project,
     azurerm_role_assignment.storage_blob_data_contributor_ai_foundry_project,
     azurerm_role_assignment.search_index_data_contributor_ai_foundry_project,
-    azurerm_role_assignment.search_service_contributor_ai_foundry_project
+    azurerm_role_assignment.search_service_contributor_ai_foundry_project,
+    azurerm_cosmosdb_sql_role_assignment.cosmosdb_sql_data_contributor_ai_foundry_project
   ]
-  create_duration = "60s"
+  create_duration = "120s"
 }
 
 ## Create the AI Foundry project capability host
@@ -590,44 +608,6 @@ resource "azapi_resource" "ai_foundry_project_capability_host" {
       ]
     }
   }
-}
-
-## Create the necessary data plane role assignments to the CosmosDb databases created by the AI Foundry Project
-##
-resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_user_thread_message_store" {
-  depends_on = [
-    azapi_resource.ai_foundry_project_capability_host
-  ]
-  name                = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}userthreadmessage_dbsqlrole")
-  resource_group_name = azurerm_resource_group.foundry.name
-  account_name        = azurerm_cosmosdb_account.cosmosdb.name
-  scope               = "${azurerm_cosmosdb_account.cosmosdb.id}/dbs/enterprise_memory/colls/${local.project_id_guid}-thread-message-store"
-  role_definition_id  = "${azurerm_cosmosdb_account.cosmosdb.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
-  principal_id        = azapi_resource.ai_foundry_project.output.identity.principalId
-}
-
-resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_system_thread_name" {
-  depends_on = [
-    azurerm_cosmosdb_sql_role_assignment.cosmosdb_db_sql_role_aifp_user_thread_message_store
-  ]
-  name                = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}systemthread_dbsqlrole")
-  resource_group_name = azurerm_resource_group.foundry.name
-  account_name        = azurerm_cosmosdb_account.cosmosdb.name
-  scope               = "${azurerm_cosmosdb_account.cosmosdb.id}/dbs/enterprise_memory/colls/${local.project_id_guid}-system-thread-message-store"
-  role_definition_id  = "${azurerm_cosmosdb_account.cosmosdb.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
-  principal_id        = azapi_resource.ai_foundry_project.output.identity.principalId
-}
-
-resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_entity_store_name" {
-  depends_on = [
-    azurerm_cosmosdb_sql_role_assignment.cosmosdb_db_sql_role_aifp_system_thread_name
-  ]
-  name                = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}entitystore_dbsqlrole")
-  resource_group_name = azurerm_resource_group.foundry.name
-  account_name        = azurerm_cosmosdb_account.cosmosdb.name
-  scope               = "${azurerm_cosmosdb_account.cosmosdb.id}/dbs/enterprise_memory/colls/${local.project_id_guid}-agent-entity-store"
-  role_definition_id  = "${azurerm_cosmosdb_account.cosmosdb.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
-  principal_id        = azapi_resource.ai_foundry_project.output.identity.principalId
 }
 
 ## Create the necessary data plane role assignments to the Azure Storage Account containers created by the AI Foundry Project
