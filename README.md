@@ -20,9 +20,12 @@ This project provides an automated launcher that deploys a complete, production-
 - **Python 3.8+** - `winget install Python.Python.3.12`
 - **Terraform** - `winget install Hashicorp.Terraform`
 - **Azure CLI** - `winget install Microsoft.AzureCLI`
+- **OpenSSL** - `winget install FireDaemon.OpenSSL`
 - **Azure Subscription** with Owner/Contributor permissions
 
 > **Note:** After installing Git and Python via `winget`, you may need to restart your terminal (or open a new one) for the PATH changes to take effect.
+
+> **Tip:** The launcher automatically checks for Terraform, Azure CLI, and OpenSSL at startup and will offer to install any missing tools via `winget` before proceeding.
 
 ```powershell
 # Login to Azure
@@ -215,6 +218,7 @@ If you prefer manual deployment over the launcher, see the individual module REA
 | Issue | Solution |
 |-------|----------|
 | Prerequisites check fails | Run `az login` and verify tools with `terraform --version` |
+| OpenSSL not found | Run `winget install FireDaemon.OpenSSL`, then restart your terminal. The launcher will also offer to install it automatically. |
 | Deployment stuck | Check `logs/deploy-*.log` for errors, use Ctrl+C and re-run to resume |
 | VPN certificates fail | Run launcher as Administrator for certificate installation |
 | Destroy fails | Check if resources were already deleted in Azure Portal |
