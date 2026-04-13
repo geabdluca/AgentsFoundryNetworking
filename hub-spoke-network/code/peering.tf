@@ -31,7 +31,10 @@ resource "azurerm_virtual_network_peering" "spoke_to_hub" {
   allow_gateway_transit        = false
   use_remote_gateways          = true
 
+  # Must run after hub_to_spoke is established (allow_gateway_transit=true on that
+  # peering must be active before use_remote_gateways=true can succeed here)
   depends_on = [
-    azurerm_virtual_network_gateway.vpn
+    azurerm_virtual_network_gateway.vpn,
+    azurerm_virtual_network_peering.hub_to_spoke,
   ]
 }
