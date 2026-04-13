@@ -338,6 +338,8 @@ def get_foundry_label(state):
     """Return a human-readable label for the deployed foundry type."""
     if state.get("foundry_type") == "apim":
         return "AI Foundry + APIM"
+    if state.get("foundry_type") == "none":
+        return "Hub-Spoke only (no AI Foundry)"
     return "AI Foundry (BYO VNet)"
 
 
@@ -472,20 +474,21 @@ def run_reselect_foundry():
     print(f"\n  {Colors.CYAN}Choose your AI Foundry deployment option:{Colors.RESET}")
     print(f"    [1] AI Foundry (BYO VNet)  - Standard private network deployment (~20-30 min)")
     print(f"    [2] AI Foundry + APIM      - Adds API Management for controlled access (~45-60 min)")
+    print(f"    [3] Hub-Spoke only         - Skip AI Foundry, use network infrastructure only")
     print(f"    [0] Cancel")
 
     while True:
-        ft_choice = input(f"\n{Colors.YELLOW}  Select option [0/1/2]: {Colors.RESET}").strip()
+        ft_choice = input(f"\n{Colors.YELLOW}  Select option [0/1/2/3]: {Colors.RESET}").strip()
         if ft_choice == "0":
             print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
             input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
             return
-        elif ft_choice in ("1", "2"):
+        elif ft_choice in ("1", "2", "3"):
             break
         else:
-            print(f"  {Colors.RED}Please enter 0, 1, or 2.{Colors.RESET}")
+            print(f"  {Colors.RED}Please enter 0, 1, 2, or 3.{Colors.RESET}")
 
-    new_type = "byo" if ft_choice == "1" else "apim"
+    new_type = "byo" if ft_choice == "1" else ("apim" if ft_choice == "2" else "none")
 
     # If switching, check the stale state path for existing Azure resources
     if prev_type and prev_type != new_type:
@@ -2507,8 +2510,9 @@ def run_deploy():
             print(f"\n  {Colors.CYAN}Choose your AI Foundry deployment option:{Colors.RESET}")
             print(f"    [1] AI Foundry (BYO VNet)         - Standard private network deployment (~20-30 min)")
             print(f"    [2] AI Foundry + APIM              - Adds API Management for controlled access (~45-60 min)")
+            print(f"    [3] Hub-Spoke only                 - Deploy network infrastructure only, skip AI Foundry")
             while True:
-                ft_choice = input(f"\n{Colors.YELLOW}  Select option [1/2]: {Colors.RESET}").strip()
+                ft_choice = input(f"\n{Colors.YELLOW}  Select option [1/2/3]: {Colors.RESET}").strip()
                 if ft_choice == "1":
                     state["foundry_type"] = "byo"
                     save_state(state)
@@ -2517,8 +2521,14 @@ def run_deploy():
                     state["foundry_type"] = "apim"
                     save_state(state)
                     break
+                elif ft_choice == "3":
+                    state["foundry_type"] = "none"
+                    save_state(state)
+                    print(f"\n  {Colors.YELLOW}Skipping AI Foundry deployment. Hub-Spoke network is ready.{Colors.RESET}")
+                    print_completion(log_file, state)
+                    return 0
                 else:
-                    print(f"  {Colors.RED}Please enter 1 or 2.{Colors.RESET}")
+                    print(f"  {Colors.RED}Please enter 1, 2, or 3.{Colors.RESET}")
 
         foundry_label = get_foundry_label(state)
         tf_path = get_foundry_tf_path(state)
