@@ -2505,8 +2505,8 @@ def run_deploy():
     print_step(5, "Deploy AI Foundry")
 
     if state["steps"]["byo_vnet"]["status"] != "completed":
-        # Prompt for BYO/APIM only if not yet chosen (first run, or after Reselect)
-        if not state.get("foundry_type"):
+        # Prompt for BYO/APIM only if not yet chosen (first run, after Reselect, or if user previously chose hub-spoke only)
+        if not state.get("foundry_type") or state.get("foundry_type") == "none":
             print(f"\n  {Colors.CYAN}Choose your AI Foundry deployment option:{Colors.RESET}")
             print(f"    [1] AI Foundry (BYO VNet)         - Standard private network deployment (~20-30 min)")
             print(f"    [2] AI Foundry + APIM              - Adds API Management for controlled access (~45-60 min)")
