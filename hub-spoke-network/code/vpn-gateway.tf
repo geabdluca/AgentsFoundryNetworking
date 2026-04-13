@@ -9,6 +9,7 @@ resource "azurerm_public_ip" "vpn_gateway" {
   resource_group_name = azurerm_resource_group.main.name
   allocation_method   = "Static"
   sku                 = "Standard"
+  zones               = ["1", "2", "3"]
 
   tags = merge(
     var.tags,
@@ -106,6 +107,7 @@ resource "azurerm_virtual_network_gateway" "vpn" {
   active_active = false
   bgp_enabled   = false
   sku           = var.vpn_gateway_sku
+  generation    = "Generation2"
 
   ip_configuration {
     name                          = "vnetGatewayConfig"

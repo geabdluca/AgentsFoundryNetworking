@@ -10,9 +10,32 @@ variable "resource_group_name" {
 }
 
 variable "location" {
-  description = "Azure region for resources"
+  description = "Azure region for resources. Must support both Availability Zones (required by VPN Gateway AZ SKUs) AND AI Foundry Private Class A subnet injection. See: https://learn.microsoft.com/azure/ai-foundry/reference/region-support"
   type        = string
   default     = "eastus"
+
+  validation {
+    condition = contains([
+      # Intersection: AZ-capable regions that also support AI Foundry Private Class A subnet
+      "australiaeast",
+      "brazilsouth",
+      "eastus",
+      "eastus2",
+      "francecentral",
+      "germanywestcentral",
+      "italynorth",
+      "japaneast",
+      "southafricanorth",
+      "southcentralus",
+      "spaincentral",
+      "swedencentral",
+      "uaenorth",
+      "uksouth",
+      "westeurope",
+      "westus3",
+    ], var.location)
+    error_message = "The region '${var.location}' is not supported. This deployment has two regional requirements:\n1. Availability Zone support (Azure VPN Gateway now requires AZ SKUs — non-AZ SKUs are retired)\n2. AI Foundry Private Class A subnet (networkInjections) GA support\nValid regions satisfying both: australiaeast, brazilsouth, eastus, eastus2, francecentral, germanywestcentral, italynorth, japaneast, southafricanorth, southcentralus, spaincentral, swedencentral, uaenorth, uksouth, westeurope, westus3.\nNote: westus and canadaeast support Foundry but not AZ — use westus3 or eastus instead."
+  }
 }
 
 variable "environment" {
@@ -101,11 +124,17 @@ variable "spoke_delegated_subnet_prefix" {
   default     = "10.1.1.0/24"
 }
 
+variable "spoke_apim_subnet_prefix" {
+  description = "Address prefix for APIM subnet in Spoke VNet (used when deploying Foundry + APIM option)"
+  type        = string
+  default     = "10.1.2.0/24"
+}
+
 # VPN Gateway Configuration
 variable "vpn_gateway_sku" {
-  description = "SKU for the VPN Gateway"
+  description = "SKU for the VPN Gateway. Must be an AZ SKU (VpnGw1AZ-VpnGw5AZ) — non-AZ SKUs (VpnGw1-5) are no longer supported by Azure."
   type        = string
-  default     = "VpnGw2"
+  default     = "VpnGw2AZ"
 }
 
 variable "vpn_client_address_pool" {

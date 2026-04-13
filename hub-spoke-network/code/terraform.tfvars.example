@@ -37,7 +37,8 @@ spoke_private_endpoints_subnet_prefix   = "10.1.0.0/24"
 spoke_delegated_subnet_prefix           = "10.1.1.0/24"
 
 # VPN Gateway Configuration
-vpn_gateway_sku           = "VpnGw2"
+# Must be an AZ SKU — non-AZ SKUs (VpnGw1-5) are no longer accepted by Azure
+vpn_gateway_sku           = "VpnGw2AZ"
 vpn_client_address_pool   = ["172.16.0.0/24"]
 vpn_root_certificate_name = "P2SRootCert"
 

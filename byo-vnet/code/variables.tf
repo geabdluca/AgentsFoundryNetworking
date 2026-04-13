@@ -64,7 +64,7 @@ variable "resource_group_name" {
 }
 
 variable "location" {
-  description = "The Azure region to deploy resources (should match your VNet region)"
+  description = "The Azure region to deploy resources. Must match the hub-spoke-network location. Region must support AI Foundry Private Class A subnet (networkInjections) — validation is enforced at the hub-spoke level."
   type        = string
 }
 

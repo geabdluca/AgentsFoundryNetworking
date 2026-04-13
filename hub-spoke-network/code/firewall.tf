@@ -90,6 +90,48 @@ resource "azurerm_firewall_policy_rule_collection_group" "main" {
       destination_fqdns = ["*"]
     }
   }
+
+  # ── Restricted rules (commented out - uncomment to enable deny-by-default policy) ──
+  #
+  # network_rule_collection {
+  #   name     = "nrc-allow-internal"
+  #   priority = 100
+  #   action   = "Allow"
+  #   rule {
+  #     name                  = "allow-vnet-internal"
+  #     protocols             = ["Any"]
+  #     source_addresses      = [var.hub_vnet_address_space, var.spoke_vnet_address_space]
+  #     destination_addresses = [var.hub_vnet_address_space, var.spoke_vnet_address_space]
+  #     destination_ports     = ["*"]
+  #   }
+  #   rule {
+  #     name                  = "allow-dns"
+  #     protocols             = ["UDP"]
+  #     source_addresses      = ["*"]
+  #     destination_addresses = ["*"]
+  #     destination_ports     = ["53"]
+  #   }
+  #   rule {
+  #     name                  = "allow-ntp"
+  #     protocols             = ["UDP"]
+  #     source_addresses      = ["*"]
+  #     destination_addresses = ["*"]
+  #     destination_ports     = ["123"]
+  #   }
+  # }
+  #
+  # network_rule_collection {
+  #   name     = "nrc-deny-all"
+  #   priority = 4000
+  #   action   = "Deny"
+  #   rule {
+  #     name                  = "deny-all-outbound"
+  #     protocols             = ["Any"]
+  #     source_addresses      = ["*"]
+  #     destination_addresses = ["*"]
+  #     destination_ports     = ["*"]
+  #   }
+  # }
 }
 
 # ============================================
@@ -234,6 +276,17 @@ resource "azurerm_route" "agents_to_firewall" {
   next_hop_type          = "VirtualAppliance"
   next_hop_in_ip_address = azurerm_firewall.main[0].ip_configuration[0].private_ip_address
 }
+
+# Route AAD traffic directly to the Internet, bypassing the firewall.
+# Uncomment to enable if agents need direct AAD access without going through firewall.
+# resource "azurerm_route" "agents_aad_direct" {
+#   count               = var.deploy_firewall ? 1 : 0
+#   name                = "route-aad-direct"
+#   resource_group_name = azurerm_resource_group.main.name
+#   route_table_name    = azurerm_route_table.agents[0].name
+#   address_prefix      = "AzureActiveDirectory"
+#   next_hop_type       = "Internet"
+# }
 
 # Associate Route Table with Agents Subnet
 resource "azurerm_subnet_route_table_association" "agents" {

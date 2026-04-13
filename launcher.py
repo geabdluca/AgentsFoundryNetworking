@@ -22,6 +22,7 @@ STATE_FILE = SCRIPT_DIR / ".deployment-state.json"
 LOG_DIR = SCRIPT_DIR / "logs"
 HUB_SPOKE_PATH = SCRIPT_DIR / "hub-spoke-network" / "code"
 BYO_VNET_PATH = SCRIPT_DIR / "byo-vnet" / "code"
+FOUNDRY_APIM_PATH = SCRIPT_DIR / "foundry-apim" / "code"
 VPN_CLIENT_PATH = SCRIPT_DIR / "VpnClient"
 TOTAL_STEPS = 5
 MIN_TERRAFORM_VERSION = "1.10.0"
@@ -39,6 +40,12 @@ REQUIRED_RESOURCE_PROVIDERS = [
 
 # Resolve PowerShell path to avoid PATH resolution issues
 POWERSHELL_PATH = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def _remove_readonly(func, path, _):
+    """Error handler for shutil.rmtree to handle read-only files on Windows."""
+    os.chmod(path, 0o777)
+    func(path)
 
 
 class Colors:
@@ -81,9 +88,12 @@ class Logger:
     def flush_buffer(self):
         """Write buffered logs to file (call when prereqs fail)."""
         if self.buffer and self.log_file:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                for entry in self.buffer:
-                    f.write(entry + "\n")
+            try:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    for entry in self.buffer:
+                        f.write(entry + "\n")
+            except OSError:
+                pass
         self.buffer = []
         self.buffering = False
     
@@ -99,8 +109,7 @@ class Logger:
         if self.buffering:
             self.buffer.append(log_entry)
         elif self.log_file:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(log_entry + "\n")
+            _append_to_log(self.log_file, log_entry + "\n")
     
     def show_tail(self, lines=20):
         if self.log_file and self.log_file.exists():
@@ -113,6 +122,15 @@ class Logger:
 
 
 logger = Logger()
+
+
+def _append_to_log(log_file, content):
+    """Append content to a log file, silently ignoring permission/IO errors."""
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(content)
+    except OSError:
+        pass  # Log file locked (e.g. open in editor) — never crash the deployer
 
 
 def print_banner():
@@ -259,6 +277,7 @@ def create_state(subscription_id, location, deploy_firewall):
         "deploy_firewall": deploy_firewall,
         "created_at": datetime.now().isoformat(),
         "rp_registered": False,  # Track if resource providers have been verified/registered
+        "foundry_type": None,  # "byo" or "apim" - set when user selects at Step 5
         "resources": {
             "hub_spoke_rg": None,
             "vpn_gateway_name": None,
@@ -308,12 +327,27 @@ def has_resources_to_destroy():
     return hub_spoke_status in ("completed", "failed", "in_progress") or byo_vnet_status in ("completed", "failed", "in_progress")
 
 
+def get_foundry_tf_path(state):
+    """Return the Terraform path for the deployed foundry type (BYO or APIM)."""
+    if state.get("foundry_type") == "apim":
+        return FOUNDRY_APIM_PATH
+    return BYO_VNET_PATH
+
+
+def get_foundry_label(state):
+    """Return a human-readable label for the deployed foundry type."""
+    if state.get("foundry_type") == "apim":
+        return "AI Foundry + APIM"
+    return "AI Foundry (BYO VNet)"
+
+
 def has_terraform_state_files():
     """Check if any terraform state files exist."""
     hub_state = HUB_SPOKE_PATH / "terraform.tfstate"
     byo_state = BYO_VNET_PATH / "terraform.tfstate"
+    apim_state = FOUNDRY_APIM_PATH / "terraform.tfstate"
     deployment_state = STATE_FILE
-    return hub_state.exists() or byo_state.exists() or deployment_state.exists()
+    return hub_state.exists() or byo_state.exists() or apim_state.exists() or deployment_state.exists()
 
 
 def run_reset():
@@ -353,7 +387,7 @@ def run_reset():
     print(f"\n  {Colors.YELLOW}This will delete:{Colors.RESET}")
     
     files_to_delete = []
-    
+
     # Check what exists
     hub_state = HUB_SPOKE_PATH / "terraform.tfstate"
     hub_backup = HUB_SPOKE_PATH / "terraform.tfstate.backup"
@@ -361,7 +395,10 @@ def run_reset():
     byo_state = BYO_VNET_PATH / "terraform.tfstate"
     byo_backup = BYO_VNET_PATH / "terraform.tfstate.backup"
     byo_lock = BYO_VNET_PATH / ".terraform.lock.hcl"
-    
+    apim_state = FOUNDRY_APIM_PATH / "terraform.tfstate"
+    apim_backup = FOUNDRY_APIM_PATH / "terraform.tfstate.backup"
+    apim_lock = FOUNDRY_APIM_PATH / ".terraform.lock.hcl"
+
     if hub_state.exists():
         files_to_delete.append(("Hub-Spoke terraform.tfstate", hub_state))
     if hub_backup.exists():
@@ -374,6 +411,12 @@ def run_reset():
         files_to_delete.append(("BYO VNet terraform.tfstate.backup", byo_backup))
     if byo_lock.exists():
         files_to_delete.append(("BYO VNet .terraform.lock.hcl", byo_lock))
+    if apim_state.exists():
+        files_to_delete.append(("Foundry+APIM terraform.tfstate", apim_state))
+    if apim_backup.exists():
+        files_to_delete.append(("Foundry+APIM terraform.tfstate.backup", apim_backup))
+    if apim_lock.exists():
+        files_to_delete.append(("Foundry+APIM .terraform.lock.hcl", apim_lock))
     if STATE_FILE.exists():
         files_to_delete.append(("Deployment state (.deployment-state.json)", STATE_FILE))
     
@@ -411,6 +454,79 @@ def run_reset():
     input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
 
 
+def run_reselect_foundry():
+    """Allow the user to change their BYO vs APIM choice before Step 5 runs.
+    Blocks if the previous choice created Azure resources (destroy first)."""
+    print(f"\n{Colors.CYAN}=== Reselect Foundry Type ==={Colors.RESET}")
+
+    state = load_state()
+    if not state:
+        print(f"\n  {Colors.YELLOW}No deployment state found. Start a deployment first.{Colors.RESET}")
+        input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+        return
+
+    prev_type = state.get("foundry_type")
+    prev_label = get_foundry_label(state) if prev_type else "(not yet selected)"
+    print(f"\n  Current choice: {Colors.CYAN}{prev_label}{Colors.RESET}")
+
+    print(f"\n  {Colors.CYAN}Choose your AI Foundry deployment option:{Colors.RESET}")
+    print(f"    [1] AI Foundry (BYO VNet)  - Standard private network deployment (~20-30 min)")
+    print(f"    [2] AI Foundry + APIM      - Adds API Management for controlled access (~45-60 min)")
+    print(f"    [0] Cancel")
+
+    while True:
+        ft_choice = input(f"\n{Colors.YELLOW}  Select option [0/1/2]: {Colors.RESET}").strip()
+        if ft_choice == "0":
+            print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
+            input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+            return
+        elif ft_choice in ("1", "2"):
+            break
+        else:
+            print(f"  {Colors.RED}Please enter 0, 1, or 2.{Colors.RESET}")
+
+    new_type = "byo" if ft_choice == "1" else "apim"
+
+    # If switching, check the stale state path for existing Azure resources
+    if prev_type and prev_type != new_type:
+        stale_path = BYO_VNET_PATH if new_type == "apim" else FOUNDRY_APIM_PATH
+        stale_state_file = stale_path / "terraform.tfstate"
+        if stale_state_file.exists():
+            has_resources = False
+            try:
+                with open(stale_state_file) as f:
+                    tf_state_data = json.load(f)
+                has_resources = bool(tf_state_data.get("resources"))
+            except Exception:
+                has_resources = True  # can't parse → assume resources exist
+            if has_resources:
+                print(f"\n  {Colors.RED}Cannot switch: the previous {prev_label} attempt created Azure resources.{Colors.RESET}")
+                print(f"  {Colors.YELLOW}Use option [2] Destroy from the main menu to clean them up first.{Colors.RESET}")
+                input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+                return
+            # Plan-only failure – safe to remove stale state
+            for fname in ("terraform.tfstate", "terraform.tfstate.backup"):
+                stale_file = stale_path / fname
+                if stale_file.exists():
+                    try:
+                        stale_file.unlink()
+                        print(f"  {Colors.GRAY}Removed stale state: {stale_file.name}{Colors.RESET}")
+                    except Exception:
+                        pass
+
+    state["foundry_type"] = new_type
+    # Reset step 5 so Deploy will re-run it with the new choice
+    state["steps"]["byo_vnet"] = {"status": "pending", "timestamp": None}
+    for key in ("byo_vnet_rg", "ai_foundry_name", "ai_foundry_project_name"):
+        state["resources"][key] = None
+    save_state(state)
+
+    new_label = get_foundry_label(state)
+    print(f"\n{Colors.GREEN}Foundry type set to: {new_label}{Colors.RESET}")
+    print(f"  Run option [1] Deploy to continue.")
+    input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
+
+
 # ============================================
 # DESTROY FUNCTIONS
 # ============================================
@@ -443,8 +559,7 @@ def run_terraform_destroy(working_dir, subscription_id, log_file):
             capture_output=True, text=True, env=env, timeout=300
         )
         
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"terraform init (destroy): {init_result.stdout}\n{init_result.stderr}\n")
+        _append_to_log(log_file, f"terraform init (destroy): {init_result.stdout}\n{init_result.stderr}\n")
         
         if init_result.returncode != 0:
             return False, f"Terraform init failed: {init_result.stderr}"
@@ -455,8 +570,7 @@ def run_terraform_destroy(working_dir, subscription_id, log_file):
             capture_output=True, text=True, env=env, timeout=1800  # 30 min timeout
         )
         
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(result.stdout + result.stderr)
+        _append_to_log(log_file, result.stdout + result.stderr)
         
         return result.returncode == 0, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
@@ -488,15 +602,14 @@ def delete_resource_group(rg_name, subscription_id, log_file):
         capture_output=True, text=True, shell=True
     )
     
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"az group delete: {result.stdout} {result.stderr}\n")
+    _append_to_log(log_file, f"az group delete: {result.stdout} {result.stderr}\n")
     
     if result.returncode != 0:
         return False, result.stderr
     
-    # Wait for deletion to complete (VPN Gateway deletion can take 15-20 min)
+    # Wait for deletion to complete
     print(f"  {Colors.GRAY}Waiting for resource group deletion...{Colors.RESET}")
-    for i in range(120):  # Wait up to 20 minutes
+    for i in range(360):  # Wait up to 60 minutes (10s intervals)
         check = subprocess.run(
             f'az group exists --name "{rg_name}" --subscription "{subscription_id}"',
             capture_output=True, text=True, shell=True
@@ -532,8 +645,7 @@ def purge_cognitive_services(account_name, resource_group, location, subscriptio
             print(f"  {Colors.GRAY}  Still waiting... ({(attempt+1)*10}s){Colors.RESET}")
     
     if not account_found:
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"Account {account_name} not found in deleted accounts after waiting, skipping purge\n")
+        _append_to_log(log_file, f"Account {account_name} not found in deleted accounts after waiting, skipping purge\n")
         print(f"  {Colors.YELLOW}Account not found in deleted accounts after 2 minutes{Colors.RESET}")
         return True, "Account not in deleted state, skipping purge"
     
@@ -545,8 +657,7 @@ def purge_cognitive_services(account_name, resource_group, location, subscriptio
         capture_output=True, text=True, shell=True
     )
     
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"az cognitiveservices account purge: {result.stdout} {result.stderr}\n")
+    _append_to_log(log_file, f"az cognitiveservices account purge: {result.stdout} {result.stderr}\n")
     
     # Check if purge succeeded
     if result.returncode == 0:
@@ -598,8 +709,7 @@ def remove_terraform_state(working_dir, log_file):
         except Exception:
             pass
     
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"Removed terraform state files: {removed}\n")
+    _append_to_log(log_file, f"Removed terraform state files: {removed}\n")
     
     return removed
 
@@ -608,25 +718,40 @@ def remove_vpn_client_files(log_file):
     """Remove downloaded VPN client files."""
     removed = []
     
-    # Remove VpnClient directory in script root
-    vpn_dir = SCRIPT_DIR / "VpnClient"
-    if vpn_dir.exists():
+    # Remove VpnClient directory in script root (legacy location)
+    vpn_dir_root = SCRIPT_DIR / "VpnClient"
+    if vpn_dir_root.exists():
         try:
-            shutil.rmtree(vpn_dir)
+            shutil.rmtree(vpn_dir_root, onerror=_remove_readonly)
             removed.append("VpnClient/")
         except Exception as e:
             logger.log(f"Failed to remove VpnClient: {e}", "WARNING")
     
-    # Remove any downloaded zip files
-    for zipfile in SCRIPT_DIR.glob("vpnclient*.zip"):
+    # Remove VpnClient directory under hub-spoke-network (current location)
+    vpn_dir_hub = SCRIPT_DIR / "hub-spoke-network" / "VpnClient"
+    if vpn_dir_hub.exists():
         try:
-            zipfile.unlink()
-            removed.append(zipfile.name)
-        except Exception:
-            pass
+            shutil.rmtree(vpn_dir_hub, onerror=_remove_readonly)
+            removed.append("hub-spoke-network/VpnClient/")
+        except Exception as e:
+            logger.log(f"Failed to remove hub-spoke-network/VpnClient: {e}", "WARNING")
     
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"Removed VPN client files: {removed}\n")
+    # Remove any downloaded zip files from both locations
+    for search_dir in [SCRIPT_DIR, SCRIPT_DIR / "hub-spoke-network"]:
+        for zf in search_dir.glob("vpnclient*.zip"):
+            try:
+                zf.unlink()
+                removed.append(str(zf.relative_to(SCRIPT_DIR)))
+            except Exception:
+                pass
+        for zf in search_dir.glob("VpnClient.zip"):
+            try:
+                zf.unlink()
+                removed.append(str(zf.relative_to(SCRIPT_DIR)))
+            except Exception:
+                pass
+    
+    _append_to_log(log_file, f"Removed VPN client files: {removed}\n")
     
     return removed
 
@@ -699,8 +824,7 @@ def remove_vpn_connection_profile(log_file):
     except Exception as e:
         logger.log(f"  ERROR checking phonebook: {e}", "ERROR")
     
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"Removed VPN connections: {removed}\n")
+    _append_to_log(log_file, f"Removed VPN connections: {removed}\n")
     
     return removed
 
@@ -724,39 +848,40 @@ def get_terraform_output(tf_dir, output_name):
 
 
 def get_byo_resource_info(state):
-    """Get BYO VNet resource information by reading terraform state file directly."""
+    """Get foundry resource information (BYO VNet or APIM) by reading terraform state file."""
     info = {
         "resource_group": "rg-aifoundry-resources",  # Default
         "ai_foundry_name": None,
         "location": state.get("location", "westus")
     }
-    
+
     # First check if saved in deployment state
     if state.get("resources", {}).get("byo_vnet_rg"):
         info["resource_group"] = state["resources"]["byo_vnet_rg"]
     if state.get("resources", {}).get("ai_foundry_name"):
         info["ai_foundry_name"] = state["resources"]["ai_foundry_name"]
         return info  # If we have saved state, use it
-    
-    # Fall back to terraform state file
+
+    # Fall back to terraform state file (check both BYO and APIM paths)
+    tf_path = get_foundry_tf_path(state)
     try:
-        state_file = BYO_VNET_PATH / "terraform.tfstate"
+        state_file = tf_path / "terraform.tfstate"
         if not state_file.exists():
             return info
-        
+
         with open(state_file, "r", encoding="utf-8") as f:
             tf_state = json.load(f)
-        
+
         outputs = tf_state.get("outputs", {})
-        
+
         if "ai_foundry_name" in outputs:
             info["ai_foundry_name"] = outputs["ai_foundry_name"].get("value")
-        
+
         if "resource_group_name" in outputs:
             info["resource_group"] = outputs["resource_group_name"].get("value")
     except Exception:
         pass
-    
+
     return info
 
 
@@ -791,55 +916,123 @@ def get_hub_spoke_resource_info(state):
     return info
 
 
+def delete_apim_instances(resource_group, subscription_id, log_file):
+    """Find and delete all APIM instances in a resource group, waiting for full VNet de-injection.
+
+    APIM in Internal VNet mode injects NICs into the spoke subnet. The RG cannot be
+    deleted until those NICs are removed, which only happens after APIM is fully deleted.
+    This must be done BEFORE issuing az group delete, otherwise the RG deletion either
+    times out or hangs waiting for APIM VNet cleanup (30-45 min).
+    """
+    # List all APIM instances in the RG
+    list_result = subprocess.run(
+        f'az apim list --resource-group "{resource_group}" --subscription "{subscription_id}" --query "[].name" --output tsv',
+        capture_output=True, text=True, shell=True
+    )
+    _append_to_log(log_file, f"az apim list: {list_result.stdout} {list_result.stderr}\n")
+
+    apim_names = [n.strip() for n in list_result.stdout.strip().splitlines() if n.strip()]
+    if not apim_names:
+        print(f"  {Colors.GRAY}No APIM instances found in RG, skipping pre-deletion{Colors.RESET}")
+        return True
+
+    for apim_name in apim_names:
+        print(f"  {Colors.YELLOW}Deleting APIM '{apim_name}' (VNet de-injection takes 30-45 min)...{Colors.RESET}")
+        logger.log(f"Pre-deleting APIM {apim_name} to allow RG deletion")
+
+        del_result = subprocess.run(
+            f'az apim delete --name "{apim_name}" --resource-group "{resource_group}" --subscription "{subscription_id}" --yes',
+            capture_output=True, text=True, shell=True
+        )
+        _append_to_log(log_file, f"az apim delete {apim_name}: {del_result.stdout} {del_result.stderr}\n")
+
+        if del_result.returncode != 0:
+            # Already gone or deletion kicked off — non-fatal, RG delete will handle it
+            print(f"  {Colors.YELLOW}  APIM delete command returned non-zero (may already be deleting): {del_result.stderr[:200]}{Colors.RESET}")
+
+        # Poll until APIM is gone (up to 60 min)
+        print(f"  {Colors.GRAY}  Waiting for APIM deletion to complete...{Colors.RESET}")
+        for i in range(360):  # 60 min max (10s intervals)
+            check = subprocess.run(
+                f'az apim show --name "{apim_name}" --resource-group "{resource_group}" --subscription "{subscription_id}" --query "provisioningState" --output tsv',
+                capture_output=True, text=True, shell=True
+            )
+            if check.returncode != 0 or "NotFound" in check.stderr or not check.stdout.strip():
+                print(f"  {Colors.GREEN}  APIM '{apim_name}' deleted.{Colors.RESET}")
+                logger.log(f"APIM {apim_name} fully deleted after {i*10}s")
+                break
+            if i % 12 == 0:  # Every 2 min
+                print(f"  {Colors.GRAY}  Still waiting for APIM deletion... ({i*10}s){Colors.RESET}")
+            time.sleep(10)
+        else:
+            print(f"  {Colors.YELLOW}  Timed out waiting for APIM deletion — proceeding anyway{Colors.RESET}")
+            logger.log(f"Timed out waiting for APIM {apim_name} deletion", "WARNING")
+
+    return True
+
+
 def destroy_byo_vnet(state, log_file):
-    """Destroy BYO VNet resources."""
-    print(f"\n{Colors.CYAN}=== Destroying BYO VNet Resources ==={Colors.RESET}")
-    logger.log("Starting BYO VNet destruction")
-    
+    """Destroy BYO VNet or APIM foundry resources (based on foundry_type in state)."""
+    foundry_label = get_foundry_label(state)
+    tf_path = get_foundry_tf_path(state)
+    print(f"\n{Colors.CYAN}=== Destroying {foundry_label} Resources ==={Colors.RESET}")
+    logger.log(f"Starting {foundry_label} destruction (path: {tf_path})")
+
     byo_info = get_byo_resource_info(state)
     subscription_id = state["subscription_id"]
-    
+
     # Step 1: Try terraform destroy
-    print(f"\n{Colors.YELLOW}[1/4] Terraform Destroy{Colors.RESET}")
-    tf_success, tf_output = run_terraform_destroy(BYO_VNET_PATH, subscription_id, log_file)
-    
+    print(f"\n{Colors.YELLOW}[1/5] Terraform Destroy{Colors.RESET}")
+    tf_success, tf_output = run_terraform_destroy(tf_path, subscription_id, log_file)
+
     if tf_success:
         print(f"  {Colors.GREEN}[OK] Terraform destroy completed{Colors.RESET}")
     else:
-        print(f"  {Colors.YELLOW}[WARN] Terraform destroy failed, falling back to resource group deletion{Colors.RESET}")
+        print(f"  {Colors.YELLOW}[WARN] Terraform destroy failed or incomplete{Colors.RESET}")
         logger.log(f"Terraform destroy failed: {tf_output[:500]}", "WARNING")
-        
-        # Step 2: Fall back to RG deletion
-        print(f"\n{Colors.YELLOW}[2/4] Delete Resource Group{Colors.RESET}")
-        rg_success, rg_output = delete_resource_group(byo_info["resource_group"], subscription_id, log_file)
-        
+
+    # Step 2: For APIM deployments, explicitly delete APIM first so its VNet NICs are
+    # fully removed before the RG delete is issued. Without this, az group delete hangs
+    # for 30-45 min waiting for VNet de-injection and typically times out.
+    if state.get("foundry_type") == "apim" and byo_info["resource_group"]:
+        print(f"\n{Colors.YELLOW}[2/5] Pre-Delete APIM (required before RG deletion){Colors.RESET}")
+        delete_apim_instances(byo_info["resource_group"], subscription_id, log_file)
+
+    # Step 3: Always delete the resource group to catch any resources not in TF state
+    # (e.g. APIM that finished provisioning after a failed/crashed apply)
+    print(f"\n{Colors.YELLOW}[3/5] Delete Resource Group{Colors.RESET}")
+    rg_name = byo_info["resource_group"]
+    if rg_name:
+        rg_success, rg_output = delete_resource_group(rg_name, subscription_id, log_file)
         if rg_success:
-            print(f"  {Colors.GREEN}[OK] Resource group deleted{Colors.RESET}")
+            print(f"  {Colors.GREEN}[OK] Resource group '{rg_name}' deleted (or already gone){Colors.RESET}")
         else:
             print(f"  {Colors.RED}[FAIL] Resource group deletion failed: {rg_output}{Colors.RESET}")
-            
-            # Offer to clean up state files anyway (RG may be deleting in background)
-            if "Timeout" in rg_output and confirm("Delete terraform state files anyway? (Allows fresh start once RG is deleted)"):
-                removed = remove_terraform_state(BYO_VNET_PATH, log_file)
-                if removed:
-                    print(f"  {Colors.GREEN}[OK] Removed: {', '.join(removed)}{Colors.RESET}")
-                    print(f"  {Colors.YELLOW}Note: Wait for RG deletion to complete in Azure, then run Deploy.{Colors.RESET}")
-            return False
-    
+            if not tf_success:
+                # Both TF destroy and RG deletion failed — offer state cleanup so user can retry
+                if "Timeout" in rg_output and confirm("Delete terraform state files anyway? (Allows fresh start once RG is deleted)"):
+                    removed = remove_terraform_state(tf_path, log_file)
+                    if removed:
+                        print(f"  {Colors.GREEN}[OK] Removed: {', '.join(removed)}{Colors.RESET}")
+                        print(f"  {Colors.YELLOW}Note: Wait for RG deletion to complete in Azure, then run Deploy.{Colors.RESET}")
+                return False
+    else:
+        print(f"  {Colors.GRAY}No resource group name found, skipping deletion{Colors.RESET}")
+
     # Wait for resources to appear as soft-deleted before purge
     print(f"\n{Colors.YELLOW}Waiting 60 seconds for resources to appear as soft-deleted...{Colors.RESET}")
     for i in range(6):
         time.sleep(10)
         print(f"  {Colors.GRAY}{(i+1)*10}s...{Colors.RESET}")
-    
-    # Step 3: Purge cognitive services
-    print(f"\n{Colors.YELLOW}[3/4] Purge Cognitive Services{Colors.RESET}")
+
+    # Step 4: Purge cognitive services
+    print(f"\n{Colors.YELLOW}[4/5] Purge Cognitive Services{Colors.RESET}")
     if byo_info["ai_foundry_name"]:
         purge_success, purge_output = purge_cognitive_services(
             byo_info["ai_foundry_name"],
             byo_info["resource_group"],
-            byo_info["location"], 
-            subscription_id, 
+            byo_info["location"],
+            subscription_id,
             log_file
         )
         if purge_success:
@@ -848,15 +1041,20 @@ def destroy_byo_vnet(state, log_file):
             print(f"  {Colors.YELLOW}[WARN] Purge may have failed: {purge_output[:200]}{Colors.RESET}")
     else:
         print(f"  {Colors.GRAY}No AI Foundry name found, skipping purge{Colors.RESET}")
-    
-    # Step 4: Remove terraform state
-    print(f"\n{Colors.YELLOW}[4/4] Clean Up Terraform State{Colors.RESET}")
-    removed = remove_terraform_state(BYO_VNET_PATH, log_file)
+
+    # Step 5: Remove terraform state
+    print(f"\n{Colors.YELLOW}[5/5] Clean Up Terraform State{Colors.RESET}")
+    removed = remove_terraform_state(tf_path, log_file)
     if removed:
         print(f"  {Colors.GREEN}[OK] Removed: {', '.join(removed)}{Colors.RESET}")
     else:
         print(f"  {Colors.GRAY}No state files to remove{Colors.RESET}")
-    
+
+    # Also clean up the other foundry path's state if stale files exist
+    other_path = BYO_VNET_PATH if tf_path == FOUNDRY_APIM_PATH else FOUNDRY_APIM_PATH
+    if (other_path / "terraform.tfstate").exists():
+        remove_terraform_state(other_path, log_file)
+
     # Update state - reset step and clear resource info
     state = update_step(state, "byo_vnet", "pending")
     if "resources" in state:
@@ -951,36 +1149,37 @@ def show_destroy_menu(state):
     """Show destroy options menu and return choice."""
     byo_status = state["steps"].get("byo_vnet", {}).get("status", "pending")
     hub_status = state["steps"].get("hub_spoke", {}).get("status", "pending")
-    
+    foundry_label = get_foundry_label(state)
+
     # Resources exist if completed, failed, or in_progress (partial deployment)
     byo_deployed = byo_status in ("completed", "failed", "in_progress")
     hub_deployed = hub_status in ("completed", "failed", "in_progress")
-    
+
     print(f"\n{Colors.RED}=== Destroy Resources ==={Colors.RESET}")
     print(f"\n  Current deployment status:")
     print(f"    Hub-Spoke Network: {Colors.GREEN if hub_status == 'completed' else Colors.YELLOW if hub_status in ('failed', 'in_progress') else Colors.GRAY}{hub_status}{Colors.RESET}")
-    print(f"    BYO VNet (AI Foundry): {Colors.GREEN if byo_status == 'completed' else Colors.YELLOW if byo_status in ('failed', 'in_progress') else Colors.GRAY}{byo_status}{Colors.RESET}")
-    
+    print(f"    {foundry_label}: {Colors.GREEN if byo_status == 'completed' else Colors.YELLOW if byo_status in ('failed', 'in_progress') else Colors.GRAY}{byo_status}{Colors.RESET}")
+
     if not byo_deployed and not hub_deployed:
         print(f"\n  {Colors.YELLOW}No resources to destroy. All steps are pending.{Colors.RESET}")
         input(f"\n{Colors.GRAY}Press Enter to return to menu...{Colors.RESET}")
         return None
-    
+
     print(f"\n  {Colors.YELLOW}Destroy Options:{Colors.RESET}")
-    
+
     options = []
     if byo_deployed:
-        options.append(("1", "Destroy BYO VNet only (AI Foundry resources)"))
+        options.append(("1", f"Destroy {foundry_label} only"))
     if byo_deployed or hub_deployed:
-        options.append(("2", "Destroy ALL (BYO VNet + Hub-Spoke Network)"))
+        options.append(("2", f"Destroy ALL ({foundry_label} + Hub-Spoke Network)"))
     options.append(("0", "Cancel - return to menu"))
-    
+
     for opt, desc in options:
         print(f"    [{opt}] {desc}")
-    
+
     while True:
         choice = input(f"\n{Colors.YELLOW}  Select option: {Colors.RESET}").strip().lower()
-        
+
         if choice == "0":
             return "cancel"
         elif choice == "1" and byo_deployed:
@@ -995,28 +1194,31 @@ def confirm_destroy(destroy_type, state):
     """Show what will be destroyed and confirm."""
     byo_info = get_byo_resource_info(state)
     hub_info = get_hub_spoke_resource_info(state)
-    
+    foundry_label = get_foundry_label(state)
+
     print(f"\n{Colors.RED}{'='*60}")
     print(f"  WARNING: The following resources will be DESTROYED")
     print(f"{'='*60}{Colors.RESET}")
-    
+
     if destroy_type in ("byo_only", "all"):
-        print(f"\n  {Colors.YELLOW}BYO VNet (AI Foundry):{Colors.RESET}")
+        print(f"\n  {Colors.YELLOW}{foundry_label}:{Colors.RESET}")
         print(f"    - Resource Group: {byo_info['resource_group']}")
         print(f"    - AI Foundry: {byo_info['ai_foundry_name'] or 'unknown'}")
         print(f"    - All resources in the group (Storage, CosmosDB, AI Search, etc.)")
-    
+        if state.get("foundry_type") == "apim":
+            print(f"    - API Management instance")
+
     if destroy_type == "all":
         print(f"\n  {Colors.YELLOW}Hub-Spoke Network:{Colors.RESET}")
         print(f"    - Resource Group: {hub_info['resource_group'] or 'unknown'}")
         print(f"    - VPN Gateway, DNS VM, VNets, NSGs, etc.")
         print(f"    - VPN client files and connection profile")
-    
+
     print(f"\n{Colors.RED}This action cannot be undone!{Colors.RESET}")
-    
+
     confirm_text = "DESTROY"
     response = input(f"\n{Colors.YELLOW}Type '{confirm_text}' to confirm: {Colors.RESET}").strip()
-    
+
     return response.upper() == confirm_text
 
 
@@ -1083,28 +1285,41 @@ def show_main_menu():
     has_deployment = has_previous_deployment()
     has_destroyable = has_resources_to_destroy()
     has_state_files = has_terraform_state_files()
-    
+
+    # Option [4] available when Step 5 is not yet completed (can reselect BYO vs APIM)
+    step5_pending = (
+        has_deployment and
+        state.get("steps", {}).get("byo_vnet", {}).get("status") != "completed"
+    )
+
+    def _print_menu():
+        print(f"\n  {Colors.YELLOW}Options:{Colors.RESET}")
+        print(f"    [1] Deploy - Start or resume deployment")
+        if has_destroyable:
+            print(f"    [2] Destroy - Remove deployed resources")
+        else:
+            print(f"    {Colors.GRAY}[2] Destroy - No resources to destroy{Colors.RESET}")
+        if has_state_files:
+            print(f"    [3] Reset - Delete all state files (fresh start)")
+        else:
+            print(f"    {Colors.GRAY}[3] Reset - No state files to delete{Colors.RESET}")
+        if step5_pending:
+            current = state.get("foundry_type")
+            current_hint = f" (current: {get_foundry_label(state)})" if current else ""
+            print(f"    [4] Reselect Foundry Type - Change BYO vs APIM{current_hint}")
+        else:
+            print(f"    {Colors.GRAY}[4] Reselect Foundry Type - Not available (Step 5 completed or not started){Colors.RESET}")
+        print(f"    [0] Quit")
+
     print(f"\n{Colors.CYAN}=== Main Menu ==={Colors.RESET}")
-    
     if has_deployment:
         completed = count_completed(state)
         print(f"\n  {Colors.GRAY}Previous deployment: {completed}/{TOTAL_STEPS} steps completed{Colors.RESET}")
-    
-    print(f"\n  {Colors.YELLOW}Options:{Colors.RESET}")
-    print(f"    [1] Deploy - Start or resume deployment")
-    if has_destroyable:
-        print(f"    [2] Destroy - Remove deployed resources")
-    else:
-        print(f"    {Colors.GRAY}[2] Destroy - No resources to destroy{Colors.RESET}")
-    if has_state_files:
-        print(f"    [3] Reset - Delete all state files (fresh start)")
-    else:
-        print(f"    {Colors.GRAY}[3] Reset - No state files to delete{Colors.RESET}")
-    print(f"    [0] Quit")
-    
+    _print_menu()
+
     while True:
         choice = input(f"\n{Colors.YELLOW}  Select option: {Colors.RESET}").strip().lower()
-        
+
         if choice == "1":
             return "deploy"
         elif choice == "2":
@@ -1117,23 +1332,16 @@ def show_main_menu():
                 return "reset"
             else:
                 print(f"  {Colors.YELLOW}No state files to delete.{Colors.RESET}")
+        elif choice == "4":
+            if step5_pending:
+                return "reselect_foundry"
+            else:
+                print(f"  {Colors.YELLOW}Not available: Step 5 is already completed or deployment hasn't started.{Colors.RESET}")
         elif choice == "0":
             return "quit"
         else:
             print(f"  {Colors.RED}Invalid option. Please try again.{Colors.RESET}")
-        
-        # Re-display menu after invalid/no-op choices
-        print(f"\n  {Colors.YELLOW}Options:{Colors.RESET}")
-        print(f"    [1] Deploy - Start or resume deployment")
-        if has_destroyable:
-            print(f"    [2] Destroy - Remove deployed resources")
-        else:
-            print(f"    {Colors.GRAY}[2] Destroy - No resources to destroy{Colors.RESET}")
-        if has_state_files:
-            print(f"    [3] Reset - Delete all state files (fresh start)")
-        else:
-            print(f"    {Colors.GRAY}[3] Reset - No state files to delete{Colors.RESET}")
-        print(f"    [0] Quit")
+        _print_menu()
 
 
 # Prerequisites Check
@@ -1224,9 +1432,11 @@ def check_prerequisites():
         results["all_passed"] = False
     
     # Check Azure CLI (use shell=True on Windows because az is az.cmd)
+    # Note: az --version can be slow on some machines; use a larger timeout and fall back
+    # to az account show to confirm CLI is present if version check times out.
     az_check = {"name": "Azure CLI", "installed": False, "version": None}
     try:
-        result = subprocess.run("az --version", capture_output=True, text=True, timeout=10, shell=True)
+        result = subprocess.run("az --version", capture_output=True, text=True, timeout=60, shell=True)
         logger.log(f"Azure CLI check: returncode={result.returncode}, stderr={result.stderr[:200] if result.stderr else 'empty'}")
         if result.returncode == 0:
             match = re.search(r"azure-cli\s+(\d+\.\d+\.\d+)", result.stdout)
@@ -1237,22 +1447,28 @@ def check_prerequisites():
         logger.log(f"Azure CLI check exception: {e}", "ERROR")
     results["details"].append(az_check)
     logger.log(f"Azure CLI: installed={az_check['installed']}, version={az_check['version']}")
-    if not az_check["installed"]:
-        results["all_passed"] = False
-    
+    # CLI install status is re-evaluated after login check below (login success implies CLI is present)
+
     # Check Azure CLI login
     login_check = {"name": "Azure CLI Login", "installed": False, "version": None}
     try:
-        result = subprocess.run("az account show", capture_output=True, text=True, timeout=10, shell=True)
+        result = subprocess.run("az account show", capture_output=True, text=True, timeout=30, shell=True)
         logger.log(f"Azure CLI login check: returncode={result.returncode}, stderr={result.stderr[:200] if result.stderr else 'empty'}")
         if result.returncode == 0:
             account = json.loads(result.stdout)
             login_check["installed"] = True
             login_check["version"] = f"Logged in as: {account.get('user', {}).get('name', 'unknown')}"
+            # If az --version timed out but login works, CLI is clearly installed
+            if not az_check["installed"]:
+                az_check["installed"] = True
+                az_check["version"] = "unknown (version check timed out)"
+                logger.log("Azure CLI: marking installed=True because login succeeded")
     except Exception as e:
         logger.log(f"Azure CLI login check exception: {e}", "ERROR")
     results["details"].append(login_check)
     logger.log(f"Azure CLI Login: logged_in={login_check['installed']}, user={login_check['version']}")
+    if not az_check["installed"]:
+        results["all_passed"] = False
     if not login_check["installed"]:
         results["all_passed"] = False
     
@@ -1573,6 +1789,62 @@ def handle_missing_prerequisites(results):
     return True
 
 
+def _try_import_existing_resources(output, env, log_file):
+    """Detect 'already exists' errors in terraform output and import those resources.
+    
+    Returns True if at least one resource was successfully imported (caller should retry apply).
+    """
+    import re
+    import time
+
+    # terraform error format:
+    #   Error: a resource with the ID "..." already exists ...
+    #     with azurerm_api_management.apim,
+    pattern = re.compile(
+        r'resource with the ID "([^"]+)" already exists.*?with ([\w.]+),',
+        re.DOTALL
+    )
+
+    matches = list(pattern.finditer(output))
+    if not matches:
+        return False
+
+    imported_any = False
+    for match in matches:
+        resource_id = match.group(1)
+        resource_address = match.group(2)
+
+        print(f"  {Colors.YELLOW}Resource already exists in Azure: {resource_address}{Colors.RESET}")
+        print(f"  {Colors.GRAY}Attempting to import into Terraform state…{Colors.RESET}")
+        logger.log(f"Auto-importing existing resource: {resource_address} ({resource_id})")
+
+        # Retry import — resource may still be activating (e.g. APIM takes 30-45 min)
+        for import_attempt in range(1, 46):  # up to 45 min
+            import_result = subprocess.run(
+                ["terraform", "import", "-no-color", resource_address, resource_id],
+                capture_output=True, text=True, env=env
+            )
+            import_output = import_result.stdout + import_result.stderr
+
+            _append_to_log(log_file, import_output)
+
+            if import_result.returncode == 0:
+                print(f"  {Colors.GREEN}Imported {resource_address} successfully.{Colors.RESET}")
+                logger.log(f"Import succeeded: {resource_address}")
+                imported_any = True
+                break
+            elif "activating" in import_output.lower() or "not ready" in import_output.lower():
+                print(f"  {Colors.YELLOW}Resource still activating. Waiting 60s (attempt {import_attempt}/45)…{Colors.RESET}")
+                logger.log(f"Import attempt {import_attempt}: resource still activating, waiting 60s")
+                time.sleep(60)
+            else:
+                print(f"  {Colors.RED}Import failed for {resource_address}. Check log for details.{Colors.RESET}")
+                logger.log(f"Import failed: {import_output[-500:]}")
+                break
+
+    return imported_any
+
+
 # Terraform Operations
 def run_terraform(working_dir, subscription_id, variables, log_file, max_retries=2):
     """Run terraform init and apply with retry logic."""
@@ -1616,28 +1888,37 @@ def run_terraform(working_dir, subscription_id, variables, log_file, max_retries
             capture_output=True, text=True, env=env
         )
         
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(result.stdout + result.stderr)
+        _append_to_log(log_file, result.stdout + result.stderr)
         
         if result.returncode != 0:
             return {"success": False, "error": "Terraform init failed", "output": result.stderr}
         
         # Apply with retries
-        for attempt in range(1, max_retries + 1):
-            print(f"  {Colors.GRAY}Applying Terraform (attempt {attempt}/{max_retries})...{Colors.RESET}")
+        imported_resources = False
+        for attempt in range(1, max_retries + 2):  # +1 slot reserved for post-import retry
+            print(f"  {Colors.GRAY}Applying Terraform (attempt {attempt})...{Colors.RESET}")
             
             result = subprocess.run(
                 ["terraform", "apply", "-auto-approve", "-no-color"],
                 capture_output=True, text=True, env=env
             )
             
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(result.stdout + result.stderr)
+            _append_to_log(log_file, result.stdout + result.stderr)
             
             if result.returncode == 0:
                 return {"success": True, "output": result.stdout}
             
-            if attempt < max_retries:
+            combined = result.stdout + result.stderr
+
+            # Auto-import resources that already exist in Azure but not in TF state
+            # (happens when a prior run failed mid-way and Azure kept provisioning)
+            if not imported_resources and "already exists" in combined:
+                if _try_import_existing_resources(combined, env, log_file):
+                    imported_resources = True
+                    print(f"  {Colors.CYAN}Retrying apply after successful import(s)...{Colors.RESET}")
+                    continue  # immediate retry — don't sleep
+
+            if attempt <= max_retries:
                 print(f"  {Colors.YELLOW}Terraform apply failed. Retrying in 10 seconds...{Colors.RESET}")
                 import time
                 time.sleep(10)
@@ -1688,6 +1969,7 @@ def run_powershell_script(script_path, elevated=False, working_dir=None, script_
         # Write wrapper script that captures output to temp log file
         temp_script.write(f'$ErrorActionPreference = "Continue"\n')
         temp_script.write(f'Set-Location "{working_dir}"\n')
+        temp_script.write(f'Start-Sleep -Seconds 2\n')
         temp_script.write(f'& "{script_path}" 2>&1 | Tee-Object -FilePath "{temp_log.name}"\n')
         temp_script.write(f'$exitCode = $LASTEXITCODE\n')
         temp_script.write(f'"EXIT_CODE:$exitCode" | Add-Content -Path "{temp_log.name}"\n')
@@ -1773,9 +2055,10 @@ def run_deploy():
             subscription_id = prompt_input("Enter Azure Subscription ID", example="00000000-0000-0000-0000-000000000000")
         
         # Get location
-        print(f"\n  {Colors.YELLOW}NOTE: Ensure you have sufficient quota in your chosen region.{Colors.RESET}")
-        print(f"  {Colors.YELLOW}      eastus2 often has limited quota for AI services.{Colors.RESET}")
-        location = prompt_input("Enter Azure Region", example="westus, westus3, westeurope", default="westus")
+        print(f"\n  {Colors.YELLOW}NOTE: Region must support both Availability Zones (required by VPN Gateway) AND AI Foundry Private subnet injection.{Colors.RESET}")
+        print(f"  {Colors.YELLOW}      Supported regions: eastus, eastus2, westus3, westeurope, uksouth, swedencentral, australiaeast, japaneast, and others.{Colors.RESET}")
+        print(f"  {Colors.YELLOW}      westus is NOT supported (no Availability Zones). eastus2 may have limited AI quota.{Colors.RESET}")
+        location = prompt_input("Enter Azure Region", example="eastus, westus3, westeurope", default="eastus")
         
         # Deploy firewall?
         deploy_firewall = confirm("Deploy Azure Firewall? (~$900/month additional cost)", default=False)
@@ -1876,8 +2159,7 @@ def run_deploy():
         script_args = f'-ResourceGroupName "{rg_name}" -VMName "{vm_name}"' if rg_name and vm_name else None
         success, output = run_powershell_script(dns_script, script_args=script_args)
         
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(output)
+        _append_to_log(log_file, output)
         
         if success:
             state = update_step(state, "dns_install", "completed")
@@ -1903,8 +2185,7 @@ def run_deploy():
         print(f"  {Colors.YELLOW}Elevating to administrator for certificate installation...{Colors.RESET}")
         success, output = run_powershell_script(cert_script, elevated=True)
         
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(output)
+        _append_to_log(log_file, output)
         
         if success:
             state = update_step(state, "cert_install", "completed")
@@ -1966,6 +2247,10 @@ def run_deploy():
                 print(f"  {Colors.GRAY}Downloading VPN client...{Colors.RESET}")
                 vpn_zip = SCRIPT_DIR / "hub-spoke-network" / "VpnClient.zip"
                 vpn_dir = SCRIPT_DIR / "hub-spoke-network" / "VpnClient"
+                
+                # Always remove stale VPN client files before extracting fresh config
+                if vpn_dir.exists():
+                    shutil.rmtree(vpn_dir, onerror=_remove_readonly)
                 
                 import urllib.request
                 urllib.request.urlretrieve(url, vpn_zip)
@@ -2044,43 +2329,50 @@ def run_deploy():
             state = update_step(state, "vpn_client", "in_progress")
             
             try:
-                print(f"\n  {Colors.GRAY}Reading VPN configuration...{Colors.RESET}")
+                print(f"\n  {Colors.GRAY}Downloading fresh VPN configuration from gateway...{Colors.RESET}")
                 
-                # Get VPN settings from terraform outputs or existing config
                 vpn_settings_file = SCRIPT_DIR / "hub-spoke-network" / "VpnClient" / "Generic" / "VpnSettings.xml"
+                vpn_zip = SCRIPT_DIR / "hub-spoke-network" / "VpnClient.zip"
+                vpn_dir = SCRIPT_DIR / "hub-spoke-network" / "VpnClient"
                 
-                # If VpnClient config doesn't exist yet, download it
-                if not vpn_settings_file.exists():
-                    print(f"  {Colors.GRAY}Generating VPN client package...{Colors.RESET}")
-                    rg_name = get_terraform_output(HUB_SPOKE_PATH, "resource_group_name")
-                    vpn_gw_id = get_terraform_output(HUB_SPOKE_PATH, "vpn_gateway_id")
-                    vpn_gw_name = vpn_gw_id.split("/")[-1] if vpn_gw_id else None
-                    
-                    if not rg_name or not vpn_gw_name:
-                        raise Exception(f"Could not get terraform outputs (rg={rg_name}, vpn={vpn_gw_name})")
-                    
-                    gen_result = subprocess.run(
-                        ["az", "network", "vnet-gateway", "vpn-client", "generate",
-                         "--resource-group", rg_name, "--name", vpn_gw_name,
-                         "--processor-architecture", "Amd64", "--output", "tsv"],
-                        capture_output=True, text=True, shell=True
-                    )
-                    
-                    if gen_result.returncode == 0:
-                        url = gen_result.stdout.strip()
-                        if url and url.startswith("http"):
-                            vpn_zip = SCRIPT_DIR / "hub-spoke-network" / "VpnClient.zip"
-                            vpn_dir = SCRIPT_DIR / "hub-spoke-network" / "VpnClient"
-                            
-                            import urllib.request
-                            urllib.request.urlretrieve(url, vpn_zip)
-                            
-                            import zipfile
-                            with zipfile.ZipFile(vpn_zip, "r") as zip_ref:
-                                zip_ref.extractall(vpn_dir)
+                # Always download fresh config from the gateway to avoid stale FQDN issues
+                rg_name = get_terraform_output(HUB_SPOKE_PATH, "resource_group_name")
+                vpn_gw_id = get_terraform_output(HUB_SPOKE_PATH, "vpn_gateway_id")
+                vpn_gw_name = vpn_gw_id.split("/")[-1] if vpn_gw_id else None
+                
+                if not rg_name or not vpn_gw_name:
+                    raise Exception(f"Could not get terraform outputs (rg={rg_name}, vpn={vpn_gw_name})")
+                
+                print(f"  {Colors.GRAY}  Resource Group: {rg_name}{Colors.RESET}")
+                print(f"  {Colors.GRAY}  VPN Gateway: {vpn_gw_name}{Colors.RESET}")
+                
+                gen_result = subprocess.run(
+                    ["az", "network", "vnet-gateway", "vpn-client", "generate",
+                     "--resource-group", rg_name, "--name", vpn_gw_name,
+                     "--processor-architecture", "Amd64", "--output", "tsv"],
+                    capture_output=True, text=True, shell=True
+                )
+                
+                if gen_result.returncode != 0:
+                    raise Exception(f"Failed to generate VPN client: {gen_result.stderr}")
+                
+                url = gen_result.stdout.strip()
+                if not url or not url.startswith("http"):
+                    raise Exception(f"Invalid VPN client URL returned: {url}")
+                
+                # Remove stale VPN client files before extracting fresh config
+                if vpn_dir.exists():
+                    shutil.rmtree(vpn_dir, onerror=_remove_readonly)
+                
+                import urllib.request
+                urllib.request.urlretrieve(url, vpn_zip)
+                
+                import zipfile
+                with zipfile.ZipFile(vpn_zip, "r") as zip_ref:
+                    zip_ref.extractall(vpn_dir)
                 
                 if not vpn_settings_file.exists():
-                    raise Exception(f"VPN settings file not found: {vpn_settings_file}")
+                    raise Exception(f"VPN settings file not found after download: {vpn_settings_file}")
                 
                 # Parse VpnSettings.xml
                 import xml.etree.ElementTree as ET
@@ -2206,11 +2498,32 @@ def run_deploy():
         print_step(4, "Install VPN Client (Optional)")
         print_result(True, "Already completed (skipped)")
     
-    # Step 5: Deploy BYO VNet AI Foundry
-    print_step(5, "Deploy AI Foundry (BYO VNet)")
-    
+    # Step 5: Deploy AI Foundry (BYO VNet or BYO VNet + APIM)
+    print_step(5, "Deploy AI Foundry")
+
     if state["steps"]["byo_vnet"]["status"] != "completed":
-        if confirm("Deploy BYO VNet AI Foundry resources? (20-30 min)"):
+        # Prompt for BYO/APIM only if not yet chosen (first run, or after Reselect)
+        if not state.get("foundry_type"):
+            print(f"\n  {Colors.CYAN}Choose your AI Foundry deployment option:{Colors.RESET}")
+            print(f"    [1] AI Foundry (BYO VNet)         - Standard private network deployment (~20-30 min)")
+            print(f"    [2] AI Foundry + APIM              - Adds API Management for controlled access (~45-60 min)")
+            while True:
+                ft_choice = input(f"\n{Colors.YELLOW}  Select option [1/2]: {Colors.RESET}").strip()
+                if ft_choice == "1":
+                    state["foundry_type"] = "byo"
+                    save_state(state)
+                    break
+                elif ft_choice == "2":
+                    state["foundry_type"] = "apim"
+                    save_state(state)
+                    break
+                else:
+                    print(f"  {Colors.RED}Please enter 1 or 2.{Colors.RESET}")
+
+        foundry_label = get_foundry_label(state)
+        tf_path = get_foundry_tf_path(state)
+
+        if confirm(f"Deploy {foundry_label} resources?"):
             # Check and register required resource providers before deployment
             if not check_and_register_resource_providers(state):
                 print(f"  {Colors.RED}Resource provider registration is required for AI Foundry deployment.{Colors.RESET}")
@@ -2219,28 +2532,44 @@ def run_deploy():
                     print(f"  {Colors.YELLOW}AI Foundry deployment skipped.{Colors.RESET}")
                     print_completion(log_file, state)
                     return 0
-                # User wants to retry
                 return run_deploy()
-            
+
             state = update_step(state, "byo_vnet", "in_progress")
-            
+
             tf_vars = {
                 "location": state["location"],
-                "use_hub_spoke": True
+                "use_hub_spoke": True,
             }
-            
-            result = run_terraform(BYO_VNET_PATH, state["subscription_id"], tf_vars, log_file)
-            
+
+            # For APIM deployments, populate publisher info from az account show
+            if state.get("foundry_type") == "apim":
+                try:
+                    result = subprocess.run("az account show", capture_output=True, text=True, timeout=30, shell=True)
+                    if result.returncode == 0:
+                        account = json.loads(result.stdout)
+                        user_name = account.get("user", {}).get("name", "AI Foundry Publisher")
+                        # Use UPN as email if it looks like one, otherwise construct a placeholder
+                        user_email = user_name if "@" in user_name else f"{user_name.replace(' ', '.').lower()}@example.com"
+                        tf_vars["apim_publisher_name"] = user_name
+                        tf_vars["apim_publisher_email"] = user_email
+                        logger.log(f"APIM publisher set from account: name={user_name}, email={user_email}")
+                except Exception as e:
+                    logger.log(f"Could not get account info for APIM publisher: {e}", "WARNING")
+                # Remove BYO-only var
+                tf_vars.pop("use_hub_spoke", None)
+
+            result = run_terraform(tf_path, state["subscription_id"], tf_vars, log_file)
+
             if result["success"]:
                 state = update_step(state, "byo_vnet", "completed")
-                print_result(True, "AI Foundry deployed")
-                
+                print_result(True, f"{foundry_label} deployed")
+
                 # Save resource names to state for destroy
                 byo_info = get_byo_resource_info(state)
-                foundry_name = get_terraform_output(BYO_VNET_PATH, "ai_foundry_name")
-                project_name = get_terraform_output(BYO_VNET_PATH, "ai_foundry_project_name")
-                rg_name = get_terraform_output(BYO_VNET_PATH, "resource_group_name")
-                
+                foundry_name = get_terraform_output(tf_path, "ai_foundry_name")
+                project_name = get_terraform_output(tf_path, "ai_foundry_project_name")
+                rg_name = get_terraform_output(tf_path, "resource_group_name")
+
                 if "resources" not in state:
                     state["resources"] = {}
                 state["resources"]["byo_vnet_rg"] = rg_name or byo_info["resource_group"]
@@ -2249,13 +2578,12 @@ def run_deploy():
                 save_state(state)
             else:
                 state = update_step(state, "byo_vnet", "failed")
-                print_result(False, "AI Foundry deployment failed")
+                print_result(False, f"{foundry_label} deployment failed")
                 logger.show_tail(20)
-                
-                # Show troubleshooting hint for repeated failures
+
                 print(f"\n  {Colors.YELLOW}TIP: If this fails repeatedly, use the Destroy option (2) from the main menu{Colors.RESET}")
                 print(f"  {Colors.YELLOW}     before retrying. Azure operations may be stuck and need cleanup.{Colors.RESET}")
-                
+
                 if confirm("Retry this step?"):
                     state = update_step(state, "byo_vnet", "pending")
                     return run_deploy()
@@ -2322,6 +2650,8 @@ def main():
             run_destroy()
         elif choice == "reset":
             run_reset()
+        elif choice == "reselect_foundry":
+            run_reselect_foundry()
         elif choice == "quit":
             print(f"\n{Colors.CYAN}Goodbye!{Colors.RESET}")
             return 0

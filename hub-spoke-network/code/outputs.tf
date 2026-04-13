@@ -70,6 +70,11 @@ output "spoke_delegated_subnet_id" {
   value       = azurerm_subnet.spoke_delegated.id
 }
 
+output "spoke_apim_subnet_id" {
+  description = "The ID of the APIM subnet in Spoke VNet (used when deploying Foundry + APIM option)"
+  value       = azurerm_subnet.spoke_apim.id
+}
+
 # ============================================
 # VPN Gateway Outputs
 # ============================================

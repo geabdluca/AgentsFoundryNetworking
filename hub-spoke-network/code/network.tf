@@ -62,6 +62,14 @@ resource "azurerm_subnet" "spoke_private_endpoints" {
   address_prefixes     = [var.spoke_private_endpoints_subnet_prefix]
 }
 
+# APIM Subnet in Spoke (used when deploying Foundry + APIM option)
+resource "azurerm_subnet" "spoke_apim" {
+  name                 = "snet-apim"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.spoke.name
+  address_prefixes     = [var.spoke_apim_subnet_prefix]
+}
+
 # Delegated Subnet for AI Foundry Agents (Microsoft.App/environments)
 resource "azurerm_subnet" "spoke_delegated" {
   name                 = "snet-agents"
@@ -168,6 +176,227 @@ resource "azurerm_subnet_network_security_group_association" "spoke_private_endp
   depends_on = [
     azurerm_network_security_group.spoke_private_endpoints,
     azurerm_subnet.spoke_private_endpoints
+  ]
+
+  timeouts {
+    create = "10m"
+    read   = "5m"
+    delete = "10m"
+  }
+}
+
+# NSG for Agents Subnet (spoke delegated subnet – Microsoft.App/environments)
+resource "azurerm_network_security_group" "agents" {
+  name                = "nsg-spoke-agents"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+
+  # ── Security rules (commented out - uncomment to add restrictions) ──
+  #
+  # # Allow intra-subnet traffic
+  # security_rule {
+  #   name                       = "Allow-Outbound-Self"
+  #   priority                   = 100
+  #   direction                  = "Outbound"
+  #   access                     = "Allow"
+  #   protocol                   = "Tcp"
+  #   source_port_range          = "*"
+  #   destination_port_range     = "443"
+  #   source_address_prefix      = "VirtualNetwork"
+  #   destination_address_prefix = var.spoke_delegated_subnet_prefix
+  # }
+  #
+  # # Allow outbound HTTPS to private endpoints subnet
+  # security_rule {
+  #   name                       = "Allow-Outbound-To-PrivateEndpoints"
+  #   priority                   = 200
+  #   direction                  = "Outbound"
+  #   access                     = "Allow"
+  #   protocol                   = "Tcp"
+  #   source_port_range          = "*"
+  #   destination_port_range     = "443"
+  #   source_address_prefix      = "VirtualNetwork"
+  #   destination_address_prefix = var.spoke_private_endpoints_subnet_prefix
+  # }
+  #
+  # # Deny all other outbound traffic
+  # security_rule {
+  #   name                       = "Deny-All-Outbound"
+  #   priority                   = 4096
+  #   direction                  = "Outbound"
+  #   access                     = "Deny"
+  #   protocol                   = "*"
+  #   source_port_range          = "*"
+  #   destination_port_range     = "*"
+  #   source_address_prefix      = "*"
+  #   destination_address_prefix = "*"
+  # }
+  #
+  # # Deny all inbound traffic
+  # security_rule {
+  #   name                       = "Deny-All-Inbound"
+  #   priority                   = 4096
+  #   direction                  = "Inbound"
+  #   access                     = "Deny"
+  #   protocol                   = "*"
+  #   source_port_range          = "*"
+  #   destination_port_range     = "*"
+  #   source_address_prefix      = "*"
+  #   destination_address_prefix = "*"
+  # }
+
+  tags = merge(
+    var.tags,
+    {
+      environment = var.environment
+    }
+  )
+}
+
+# Associate NSG with Agents Subnet
+resource "azurerm_subnet_network_security_group_association" "agents" {
+  subnet_id                 = azurerm_subnet.spoke_delegated.id
+  network_security_group_id = azurerm_network_security_group.agents.id
+
+  depends_on = [
+    azurerm_network_security_group.agents,
+    azurerm_subnet.spoke_delegated,
+    azurerm_virtual_network_peering.hub_to_spoke,
+    azurerm_virtual_network_peering.spoke_to_hub
+  ]
+
+  timeouts {
+    create = "10m"
+    read   = "5m"
+    delete = "10m"
+  }
+}
+
+# ============================================
+# NSG for APIM Subnet
+# ============================================
+# Mandatory rules required for APIM internal VNet mode.
+# Lives here (hub-spoke) because the subnet is owned here.
+# Rules are always present; harmless if APIM is not deployed.
+resource "azurerm_network_security_group" "apim" {
+  name                = "nsg-snet-apim"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+
+  ## Inbound rules
+  security_rule {
+    name                       = "AllowAPIMManagement"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "3443"
+    source_address_prefix      = "ApiManagement"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  security_rule {
+    name                       = "AllowAzureLoadBalancer"
+    priority                   = 110
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "6390"
+    source_address_prefix      = "AzureLoadBalancer"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  security_rule {
+    name                       = "AllowHTTPSInbound"
+    priority                   = 120
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  ## Outbound rules required for APIM dependencies
+  security_rule {
+    name                       = "AllowStorageOutbound"
+    priority                   = 100
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "Storage"
+  }
+
+  security_rule {
+    name                       = "AllowSQLOutbound"
+    priority                   = 110
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "1433"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "Sql"
+  }
+
+  security_rule {
+    name                       = "AllowKeyVaultOutbound"
+    priority                   = 120
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureKeyVault"
+  }
+
+  security_rule {
+    name                       = "AllowMonitorOutbound"
+    priority                   = 130
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["443", "1886"]
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureMonitor"
+  }
+
+  security_rule {
+    name                       = "AllowEntraIDOutbound"
+    priority                   = 140
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureActiveDirectory"
+  }
+
+  tags = merge(
+    var.tags,
+    {
+      environment = var.environment
+    }
+  )
+}
+
+# Associate NSG with APIM Subnet
+resource "azurerm_subnet_network_security_group_association" "apim" {
+  subnet_id                 = azurerm_subnet.spoke_apim.id
+  network_security_group_id = azurerm_network_security_group.apim.id
+
+  depends_on = [
+    azurerm_network_security_group.apim,
+    azurerm_subnet.spoke_apim,
   ]
 
   timeouts {

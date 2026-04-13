@@ -88,6 +88,13 @@ logs/
 # Design documentation (internal only)
 DESIGN.md
 
+# Local working notes (not for repo)
+WIKI.md
+Agent-Rbac-errors.md
+VALIDATION-CHECKLIST.txt
+project-caphost-fix-instructions.txt
+foundry-caphost-setup.txt
+
 # Node
 node_modules/
 npm-debug.log*

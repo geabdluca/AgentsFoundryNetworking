@@ -105,7 +105,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "  [OK] Created 6 conditional forwarders (batch 1)" -ForegroundColor Green
 
 # Create conditional forwarders for Azure DNS zones (batch 2)
-Write-Host "  > Creating conditional forwarders (batch 2/2)..." -ForegroundColor Cyan
+Write-Host "  > Creating conditional forwarders (batch 2/3)..." -ForegroundColor Cyan
 $zones2 = @('queue.core.windows.net', 'cognitiveservices.azure.com', 'openai.azure.com', 'documents.azure.com', 'search.windows.net', 'vaultcore.azure.net')
 $scriptContent2 = ($zones2 | ForEach-Object { "Add-DnsServerConditionalForwarderZone -Name '$_' -MasterServers 168.63.129.16" }) -join '; '
 
@@ -121,6 +121,25 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "  [OK] Created 6 conditional forwarders (batch 2)" -ForegroundColor Green
 
+# Create conditional forwarders for API Management (batch 3)
+# Required for APIM internal VNet mode: gateway/portal/management URLs (*.azure-api.net)
+# resolve to APIM's private VIP via Azure DNS (168.63.129.16)
+Write-Host "  > Creating conditional forwarders (batch 3/3) - APIM..." -ForegroundColor Cyan
+$zones3 = @('azure-api.net')
+$scriptContent3 = ($zones3 | ForEach-Object { "Add-DnsServerConditionalForwarderZone -Name '$_' -MasterServers 168.63.129.16" }) -join '; '
+
+$result3 = az vm run-command invoke `
+    --resource-group $ResourceGroupName `
+    --name $VMName `
+    --command-id RunPowerShellScript `
+    --scripts $scriptContent3
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Failed to create conditional forwarders (batch 3 - APIM)" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  [OK] Created 1 conditional forwarder (batch 3 - APIM)" -ForegroundColor Green
+
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "DNS Server Installation Complete!" -ForegroundColor Green
@@ -128,7 +147,7 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "[OK] DNS Server role installed" -ForegroundColor Green
 Write-Host "[OK] DNS forwarder configured: 168.63.129.16" -ForegroundColor Green
-Write-Host "[OK] 12 conditional forwarders created:" -ForegroundColor Green
+Write-Host "[OK] 13 conditional forwarders created:" -ForegroundColor Green
 Write-Host "  - services.ai.azure.com" -ForegroundColor White
 Write-Host "  - api.azureml.ms" -ForegroundColor White
 Write-Host "  - notebooks.azure.net" -ForegroundColor White
@@ -141,6 +160,7 @@ Write-Host "  - openai.azure.com" -ForegroundColor White
 Write-Host "  - documents.azure.com" -ForegroundColor White
 Write-Host "  - search.windows.net" -ForegroundColor White
 Write-Host "  - vaultcore.azure.net" -ForegroundColor White
+Write-Host "  - azure-api.net (APIM gateway/portal/management)" -ForegroundColor White
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "1. Ensure VPN client is installed and connected"
