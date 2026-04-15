@@ -85,19 +85,3 @@ variable "apim_sku" {
     error_message = "APIM SKU must be Developer, Standard, or Premium for internal VNet integration."
   }
 }
-
-# ============================================
-# AI Gateway Policy Configuration
-# ============================================
-
-variable "apim_token_limit_per_minute" {
-  description = "Maximum number of LLM tokens (prompt + completion combined) allowed per subscription key per renewal window. Requests exceeding this limit receive HTTP 429."
-  type        = number
-  default     = 10000
-}
-
-variable "apim_token_limit_renewal_period" {
-  description = "Token rate limit window duration in seconds. The token counter resets after this period. Default is 60 (1 minute)."
-  type        = number
-  default     = 60
-}
