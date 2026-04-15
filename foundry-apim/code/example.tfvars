@@ -12,3 +12,9 @@ resource_group_name  = "rg-aifoundry-apim"
 environment          = "lab"
 project_name         = "apim-agent-project"
 apim_sku             = "Developer"
+
+# AI Gateway: Token Rate Limiting
+# Maximum total tokens (prompt + completion) per subscription key per window
+apim_token_limit_per_minute    = 10000
+# Window duration in seconds (60 = 1 minute rolling window)
+apim_token_limit_renewal_period = 60

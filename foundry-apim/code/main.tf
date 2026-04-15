@@ -572,3 +572,22 @@ resource "azurerm_api_management_api" "ai_foundry_api" {
 
   depends_on = [azapi_resource.ai_foundry]
 }
+
+## ============================================
+## AI Gateway: Token Rate Limiting Policy
+## ============================================
+## Limits total LLM tokens (prompt + completion) per subscription key
+## per rolling time window. Returns HTTP 429 when limit is exceeded.
+## Requires APIM stv2 compute (default for all new instances since Sep 2023).
+resource "azurerm_api_management_api_policy" "token_limit" {
+  api_name            = azurerm_api_management_api.ai_foundry_api.name
+  api_management_name = azurerm_api_management.apim.name
+  resource_group_name = azurerm_resource_group.foundry.name
+
+  xml_content = templatefile("${path.module}/policies/token-rate-limit.xml", {
+    tokens_per_minute = var.apim_token_limit_per_minute
+    renewal_period    = var.apim_token_limit_renewal_period
+  })
+
+  depends_on = [azurerm_api_management_api.ai_foundry_api]
+}
