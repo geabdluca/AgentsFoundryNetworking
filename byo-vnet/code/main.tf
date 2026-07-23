@@ -209,14 +209,14 @@ resource "azapi_resource" "ai_foundry" {
   )
 }
 
-## Create a deployment for OpenAI's GPT-4o in the AI Foundry resource
+## Create a deployment for OpenAI's GPT-5.1 in the AI Foundry resource
 ##
 resource "azurerm_cognitive_deployment" "aifoundry_deployment_gpt_4o" {
   depends_on = [
     azapi_resource.ai_foundry
   ]
 
-  name                 = "gpt-4o"
+  name                 = "gpt-5.1"
   cognitive_account_id = azapi_resource.ai_foundry.id
 
   sku {
@@ -226,8 +226,8 @@ resource "azurerm_cognitive_deployment" "aifoundry_deployment_gpt_4o" {
 
   model {
     format  = "OpenAI"
-    name    = "gpt-4o"
-    version = "2024-11-20"
+    name    = "gpt-5.1"
+    version = "2025-11-13"
   }
 }
 
